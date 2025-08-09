@@ -1,0 +1,202 @@
+// Stage 3: Extract subtitle tracks that need conversion
+// This block uses mkvextract to pull out subtitle tracks
+
+module.exports = async (args) => {
+  const path = require('path');
+  const { spawn } = require('child_process');
+  const fs = require('fs');
+  
+  console.log('═══════════════════════════════════════');
+  console.log('   STAGE 3: EXTRACT SUBTITLES');
+  console.log('═══════════════════════════════════════');
+  
+  // Check if we should skip
+  if (args.variables.skipProcessing || !args.variables.needsProcessing) {
+    console.log('⚠️ Skipping extraction - no processing needed');
+    return {
+      outputFileObj: args.inputFileObj,
+      outputNumber: 1,
+      variables: args.variables,
+    };
+  }
+  
+  const analysis = args.variables.subtitleAnalysis;
+  const inputFile = args.variables.originalFile;
+  
+  // Determine working directory - use the cache directory from library settings
+  let workDir = 'Y:/cache'; // Default from your log
+  
+  // Try to get from library settings first
+  if (args.librarySettings && args.librarySettings.cache) {
+    workDir = args.librarySettings.cache;
+  }
+  
+  // Ensure working directory exists
+  try {
+    if (!fs.existsSync(workDir)) {
+      fs.mkdirSync(workDir, { recursive: true });
+      console.log(`Created working directory: ${workDir}`);
+    }
+  } catch (error) {
+    console.error(`❌ Failed to create working directory: ${error.message}`);
+    args.variables.skipProcessing = true;
+    args.variables.error = `Failed to create working directory: ${error.message}`;
+    return {
+      outputFileObj: args.inputFileObj,
+      outputNumber: 1,
+      variables: args.variables,
+    };
+  }
+  
+  console.log(`Working directory: ${workDir}`);
+  
+  // Store extraction info for next stages
+  args.variables.extractedFiles = [];
+  args.variables.workDir = workDir;
+  
+  // Only extract tracks that need conversion
+  if (analysis.toConvert.length === 0) {
+    console.log('No tracks need extraction (only discarding)');
+    return {
+      outputFileObj: args.inputFileObj,
+      outputNumber: 1,
+      variables: args.variables,
+    };
+  }
+  
+  console.log(`Extracting ${analysis.toConvert.length} subtitle tracks:\n`);
+  
+  // Extract each track individually
+  for (const track of analysis.toConvert) {
+    // Determine file extension based on format
+    let extension = 'sub';
+    if (track.format === 'ass' || track.format === 'ssa') {
+      extension = 'ass';
+    } else if (track.format === 'webvtt') {
+      extension = 'vtt';
+    } else if (track.format === 'mov_text') {
+      extension = 'txt';
+    }
+    
+    const outputFile = path.join(workDir, `subtitle_${track.id}.${extension}`);
+    
+    console.log(`Extracting Track ${track.id}:`);
+    console.log(`  Format: ${track.format}`);
+    console.log(`  Output: ${path.basename(outputFile)}`);
+    
+    // Use promise wrapper for spawn
+    const extractResult = await new Promise((resolve) => {
+      // Build arguments array for mkvextract
+      const args = [
+        'tracks',
+        inputFile,
+        `${track.id}:${outputFile}`
+      ];
+      
+      console.log(`  Command: mkvextract ${args.join(' ')}`);
+      
+      // Find mkvextract path - common locations on Windows
+      let mkvextractPath = 'mkvextract';
+      
+      // Check common Windows installation paths
+      const possiblePaths = [
+        'C:\\Program Files\\MKVToolNix\\mkvextract.exe',
+        'C:\\Program Files (x86)\\MKVToolNix\\mkvextract.exe',
+        'mkvextract' // Hope it's in PATH
+      ];
+      
+      for (const testPath of possiblePaths) {
+        if (fs.existsSync(testPath)) {
+          mkvextractPath = testPath;
+          console.log(`  Found mkvextract at: ${testPath}`);
+          break;
+        }
+      }
+      
+      const extractProcess = spawn(mkvextractPath, args);
+      
+      let stdoutData = '';
+      let stderrData = '';
+      let timedOut = false;
+      
+      // Set timeout
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        console.log('  ⚠️ Extraction taking too long, killing process...');
+        extractProcess.kill('SIGTERM');
+      }, 60000); // 60 seconds timeout
+      
+      extractProcess.stdout.on('data', (data) => {
+        stdoutData += data.toString();
+      });
+      
+      extractProcess.stderr.on('data', (data) => {
+        stderrData += data.toString();
+        // mkvextract outputs progress to stderr, show it
+        const progress = data.toString().trim();
+        if (progress.includes('Progress:') || progress.includes('%')) {
+          process.stdout.write(`\r  ${progress}`);
+        }
+      });
+      
+      extractProcess.on('close', (code) => {
+        clearTimeout(timeout);
+        console.log(''); // New line after progress
+        
+        if (timedOut) {
+          console.log(`  ❌ Extraction timed out`);
+          resolve({ success: false, error: 'timeout' });
+        } else if (code !== 0) {
+          console.log(`  ❌ mkvextract exited with code ${code}`);
+          if (stderrData) {
+            console.log(`  Error: ${stderrData}`);
+          }
+          resolve({ success: false, error: stderrData });
+        } else {
+          resolve({ success: true });
+        }
+      });
+      
+      extractProcess.on('error', (err) => {
+        clearTimeout(timeout);
+        console.log(`  ❌ Failed to start mkvextract: ${err.message}`);
+        resolve({ success: false, error: err.message });
+      });
+    });
+    
+    // Check if extraction succeeded
+    if (extractResult.success && fs.existsSync(outputFile)) {
+      const stats = fs.statSync(outputFile);
+      console.log(`  ✓ Extracted successfully: ${stats.size} bytes`);
+      
+      // Store info for conversion stage
+      args.variables.extractedFiles.push({
+        trackId: track.id,
+        inputFile: outputFile,
+        format: track.format,
+        language: track.language,
+        codec: track.codec
+      });
+    } else {
+      console.log(`  ❌ Extraction failed`);
+      
+      // IMPORTANT: Don't set skipProcessing here, we want to continue
+      // and remove the problematic subtitle in the remux stage
+    }
+    
+    console.log('');
+  }
+  
+  // Summary
+  console.log('━━━ Extraction Summary ━━━');
+  console.log(`✓ Successfully extracted: ${args.variables.extractedFiles.length}/${analysis.toConvert.length} tracks`);
+  
+  // Even if extraction failed, we should continue to remove the problematic subtitles
+  // Don't set skipProcessing = true here
+  
+  return {
+    outputFileObj: args.inputFileObj,
+    outputNumber: 1,
+    variables: args.variables,
+  };
+};

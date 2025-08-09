@@ -45,10 +45,16 @@ module.exports = async (args) => {
       'C:\\Program Files (x86)\\MKVToolNix\\mkvmerge.exe'
     ]) || 'mkvmerge'; // last resort: PATH
 
-  if (!mkvmergeExe) {
-    console.error('❌ mkvmerge not found');
+  console.log(`Using mkvmerge: ${mkvmergeExe}`);
+
+  // Test if mkvmerge is accessible
+  try {
+    execFileSync(mkvmergeExe, ['--version'], { encoding: 'utf8', timeout: 10000 });
+    console.log('✓ mkvmerge is accessible');
+  } catch (testError) {
+    console.error('❌ mkvmerge not accessible:', testError.message);
     args.variables.skipProcessing = true;
-    args.variables.error = 'mkvmerge not found';
+    args.variables.error = `mkvmerge not accessible: ${testError.message}`;
     return {
       outputFileObj: args.inputFileObj,
       outputNumber: 2,
