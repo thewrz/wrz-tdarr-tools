@@ -50,9 +50,19 @@ module.exports = async (args) => {
   
   console.log(`Working directory: ${workDir}`);
   
+  // Create unique identifier for this processing session to avoid conflicts
+  const crypto = require('crypto');
+  const inputFileHash = crypto.createHash('md5').update(inputFile).digest('hex').substring(0, 8);
+  const processId = process.pid;
+  const timestamp = Date.now();
+  const uniqueId = `${inputFileHash}_${processId}_${timestamp}`;
+  
+  console.log(`Unique processing ID: ${uniqueId}`);
+  
   // Store extraction info for next stages
   args.variables.extractedFiles = [];
   args.variables.workDir = workDir;
+  args.variables.uniqueId = uniqueId;
   
   // Only extract tracks that need conversion
   if (analysis.toConvert.length === 0) {
@@ -88,7 +98,7 @@ module.exports = async (args) => {
       extension = 'txt';
     }
     
-    const outputFile = path.join(workDir, `subtitle_${track.id}.${extension}`);
+    const outputFile = path.join(workDir, `subtitle_${uniqueId}_${track.id}.${extension}`);
     
     console.log(`Extracting Track ${track.id}:`);
     console.log(`  Format: ${track.format}`);

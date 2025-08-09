@@ -26,6 +26,19 @@ module.exports = async (args) => {
   const workDir = args.variables.workDir;
   const inputFile = args.variables.originalFile;
   const containerType = args.variables.containerType || 'mkv';
+  const uniqueId = args.variables.uniqueId;
+  
+  if (!uniqueId) {
+    console.log('❌ No unique ID found - cannot ensure file safety');
+    args.variables.skipProcessing = true;
+    return {
+      outputFileObj: args.inputFileObj,
+      outputNumber: 1,
+      variables: args.variables,
+    };
+  }
+  
+  console.log(`Processing files for session: ${uniqueId}`);
   
   // Check if we have anything to do
   const hasConversions = convertedFiles.length > 0;
@@ -40,9 +53,9 @@ module.exports = async (args) => {
     };
   }
   
-  // Create temp output file path
+  // Create temp output file path with unique ID to prevent conflicts
   const fileName = path.basename(inputFile);
-  const tempOutput = path.join(workDir, `temp_${fileName}`);
+  const tempOutput = path.join(workDir, `temp_${uniqueId}_${fileName}`);
   
   console.log(`Input file: ${inputFile}`);
   console.log(`Container type: ${containerType}`);

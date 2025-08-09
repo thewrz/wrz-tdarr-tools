@@ -22,6 +22,19 @@ module.exports = async (args) => {
   
   const extractedFiles = args.variables.extractedFiles || [];
   const workDir = args.variables.workDir;
+  const uniqueId = args.variables.uniqueId;
+  
+  if (!uniqueId) {
+    console.log('❌ No unique ID found - cannot ensure file safety');
+    args.variables.skipProcessing = true;
+    return {
+      outputFileObj: args.inputFileObj,
+      outputNumber: 1,
+      variables: args.variables,
+    };
+  }
+  
+  console.log(`Processing files for session: ${uniqueId}`);
   
   if (extractedFiles.length === 0) {
     console.log('No files to convert');
@@ -54,7 +67,7 @@ module.exports = async (args) => {
   console.log(`Converting ${extractedFiles.length} subtitle files:\n`);
   
   for (const file of extractedFiles) {
-    const outputFile = path.join(workDir, `subtitle_${file.trackId}.srt`);
+    const outputFile = path.join(workDir, `subtitle_${uniqueId}_${file.trackId}.srt`);
     
     console.log(`Track ${file.trackId} (${file.format}):`);
     console.log(`  Input: ${path.basename(file.inputFile)}`);

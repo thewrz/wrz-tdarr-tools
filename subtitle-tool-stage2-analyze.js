@@ -140,6 +140,11 @@ module.exports = async (args) => {
   args.variables.subtitleAnalysis = analysis;
   args.variables.needsProcessing = needsProcessing;
   
+  // Ensure uniqueId is preserved if it exists from previous stages
+  if (args.variables.uniqueId) {
+    console.log(`Preserving unique ID: ${args.variables.uniqueId}`);
+  }
+  
   return {
     outputFileObj: args.inputFileObj,
     outputNumber: 1,
