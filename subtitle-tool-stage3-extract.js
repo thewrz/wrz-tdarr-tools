@@ -1,5 +1,5 @@
 // Stage 3: Extract subtitle tracks that need conversion
-// This block uses mkvextract to pull out subtitle tracks
+// This block uses mkvextract for MKV or ffmpeg for MP4
 
 module.exports = async (args) => {
   const path = require('path');
@@ -64,7 +64,17 @@ module.exports = async (args) => {
     };
   }
   
+  const containerType = args.variables.containerType || 'mkv';
+  console.log(`Container type: ${containerType}`);
   console.log(`Extracting ${analysis.toConvert.length} subtitle tracks:\n`);
+  
+  // Helper function to resolve binary paths
+  function resolveBin(candidates) {
+    for (const p of candidates) {
+      try { if (fs.existsSync(p)) return p; } catch {}
+    }
+    return null;
+  }
   
   // Extract each track individually
   for (const track of analysis.toConvert) {
@@ -84,88 +94,156 @@ module.exports = async (args) => {
     console.log(`  Format: ${track.format}`);
     console.log(`  Output: ${path.basename(outputFile)}`);
     
-    // Use promise wrapper for spawn
-    const extractResult = await new Promise((resolve) => {
-      // Build arguments array for mkvextract
-      const args = [
-        'tracks',
-        inputFile,
-        `${track.id}:${outputFile}`
-      ];
-      
-      console.log(`  Command: mkvextract ${args.join(' ')}`);
-      
-      // Find mkvextract path - common locations on Windows
-      let mkvextractPath = 'mkvextract';
-      
-      // Check common Windows installation paths
-      const possiblePaths = [
-        'C:\\Program Files\\MKVToolNix\\mkvextract.exe',
-        'C:\\Program Files (x86)\\MKVToolNix\\mkvextract.exe',
-        'mkvextract' // Hope it's in PATH
-      ];
-      
-      for (const testPath of possiblePaths) {
-        if (fs.existsSync(testPath)) {
-          mkvextractPath = testPath;
-          console.log(`  Found mkvextract at: ${testPath}`);
-          break;
-        }
-      }
-      
-      const extractProcess = spawn(mkvextractPath, args);
-      
-      let stdoutData = '';
-      let stderrData = '';
-      let timedOut = false;
-      
-      // Set timeout
-      const timeout = setTimeout(() => {
-        timedOut = true;
-        console.log('  ⚠️ Extraction taking too long, killing process...');
-        extractProcess.kill('SIGTERM');
-      }, 60000); // 60 seconds timeout
-      
-      extractProcess.stdout.on('data', (data) => {
-        stdoutData += data.toString();
-      });
-      
-      extractProcess.stderr.on('data', (data) => {
-        stderrData += data.toString();
-        // mkvextract outputs progress to stderr, show it
-        const progress = data.toString().trim();
-        if (progress.includes('Progress:') || progress.includes('%')) {
-          process.stdout.write(`\r  ${progress}`);
-        }
-      });
-      
-      extractProcess.on('close', (code) => {
-        clearTimeout(timeout);
-        console.log(''); // New line after progress
+    let extractResult;
+    
+    if (containerType === 'mkv') {
+      // Use mkvextract for MKV files
+      extractResult = await new Promise((resolve) => {
+        const args = [
+          'tracks',
+          inputFile,
+          `${track.id}:${outputFile}`
+        ];
         
-        if (timedOut) {
-          console.log(`  ❌ Extraction timed out`);
-          resolve({ success: false, error: 'timeout' });
-        } else if (code !== 0) {
-          console.log(`  ❌ mkvextract exited with code ${code}`);
-          if (stderrData) {
-            console.log(`  Error: ${stderrData}`);
-          }
-          resolve({ success: false, error: stderrData });
-        } else {
-          resolve({ success: true });
+        console.log(`  Command: mkvextract ${args.join(' ')}`);
+        
+        const mkvextractPath = resolveBin([
+          'C:\\Program Files\\MKVToolNix\\mkvextract.exe',
+          'C:\\Program Files (x86)\\MKVToolNix\\mkvextract.exe',
+          'mkvextract'
+        ]);
+        
+        if (mkvextractPath !== 'mkvextract') {
+          console.log(`  Found mkvextract at: ${mkvextractPath}`);
         }
+        
+        const extractProcess = spawn(mkvextractPath, args);
+        
+        let stdoutData = '';
+        let stderrData = '';
+        let timedOut = false;
+        
+        const timeout = setTimeout(() => {
+          timedOut = true;
+          console.log('  ⚠️ Extraction taking too long, killing process...');
+          extractProcess.kill('SIGTERM');
+        }, 60000);
+        
+        extractProcess.stdout.on('data', (data) => {
+          stdoutData += data.toString();
+        });
+        
+        extractProcess.stderr.on('data', (data) => {
+          stderrData += data.toString();
+          const progress = data.toString().trim();
+          if (progress.includes('Progress:') || progress.includes('%')) {
+            process.stdout.write(`\r  ${progress}`);
+          }
+        });
+        
+        extractProcess.on('close', (code) => {
+          clearTimeout(timeout);
+          console.log('');
+          
+          if (timedOut) {
+            console.log(`  ❌ Extraction timed out`);
+            resolve({ success: false, error: 'timeout' });
+          } else if (code !== 0) {
+            console.log(`  ❌ mkvextract exited with code ${code}`);
+            if (stderrData) {
+              console.log(`  Error: ${stderrData}`);
+            }
+            resolve({ success: false, error: stderrData });
+          } else {
+            resolve({ success: true });
+          }
+        });
+        
+        extractProcess.on('error', (err) => {
+          clearTimeout(timeout);
+          console.log(`  ❌ Failed to start mkvextract: ${err.message}`);
+          resolve({ success: false, error: err.message });
+        });
       });
       
-      extractProcess.on('error', (err) => {
-        clearTimeout(timeout);
-        console.log(`  ❌ Failed to start mkvextract: ${err.message}`);
-        resolve({ success: false, error: err.message });
+    } else if (containerType === 'mp4') {
+      // Use ffmpeg for MP4 files
+      extractResult = await new Promise((resolve) => {
+        const ffmpegPath = resolveBin([
+          'C:\\programdata\\chocolatey\\bin\\ffmpeg.exe',
+          'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe',
+          'C:\\ffmpeg\\bin\\ffmpeg.exe',
+          'ffmpeg'
+        ]);
+        
+        if (ffmpegPath !== 'ffmpeg') {
+          console.log(`  Found ffmpeg at: ${ffmpegPath}`);
+        }
+        
+        // For MP4, we need to map by absolute stream index, not subtitle-relative index
+        const args = [
+          '-i', inputFile,
+          '-map', `0:${track.id}`,    // Map stream by absolute index
+          '-c:s', 'copy',             // Copy subtitle codec
+          '-y',                       // Overwrite output
+          outputFile
+        ];
+        
+        console.log(`  Command: ffmpeg ${args.join(' ')}`);
+        
+        const extractProcess = spawn(ffmpegPath, args);
+        
+        let stdoutData = '';
+        let stderrData = '';
+        let timedOut = false;
+        
+        const timeout = setTimeout(() => {
+          timedOut = true;
+          console.log('  ⚠️ Extraction taking too long, killing process...');
+          extractProcess.kill('SIGTERM');
+        }, 60000);
+        
+        extractProcess.stdout.on('data', (data) => {
+          stdoutData += data.toString();
+        });
+        
+        extractProcess.stderr.on('data', (data) => {
+          stderrData += data.toString();
+          // ffmpeg outputs progress to stderr
+          const progress = data.toString().trim();
+          if (progress.includes('time=') || progress.includes('frame=')) {
+            process.stdout.write(`\r  ${progress.split('\n').pop()}`);
+          }
+        });
+        
+        extractProcess.on('close', (code) => {
+          clearTimeout(timeout);
+          console.log('');
+          
+          if (timedOut) {
+            console.log(`  ❌ Extraction timed out`);
+            resolve({ success: false, error: 'timeout' });
+          } else if (code !== 0) {
+            console.log(`  ❌ ffmpeg exited with code ${code}`);
+            if (stderrData) {
+              console.log(`  Error: ${stderrData}`);
+            }
+            resolve({ success: false, error: stderrData });
+          } else {
+            resolve({ success: true });
+          }
+        });
+        
+        extractProcess.on('error', (err) => {
+          clearTimeout(timeout);
+          console.log(`  ❌ Failed to start ffmpeg: ${err.message}`);
+          resolve({ success: false, error: err.message });
+        });
       });
-    });
+    }
     
     // Check if extraction succeeded
-    if (extractResult.success && fs.existsSync(outputFile)) {
+    if (extractResult && extractResult.success && fs.existsSync(outputFile)) {
       const stats = fs.statSync(outputFile);
       console.log(`  ✓ Extracted successfully: ${stats.size} bytes`);
       

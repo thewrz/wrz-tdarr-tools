@@ -1,5 +1,6 @@
 // Stage 5: Remux file with converted SRT subtitles
 // This block removes all original subtitles and adds back the converted SRT files
+// Uses mkvmerge for MKV files and ffmpeg for MP4 files
 
 module.exports = async (args) => {
   const path = require('path');
@@ -24,6 +25,7 @@ module.exports = async (args) => {
   const convertedFiles = args.variables.convertedFiles || [];
   const workDir = args.variables.workDir;
   const inputFile = args.variables.originalFile;
+  const containerType = args.variables.containerType || 'mkv';
   
   // Check if we have anything to do
   const hasConversions = convertedFiles.length > 0;
@@ -43,10 +45,11 @@ module.exports = async (args) => {
   const tempOutput = path.join(workDir, `temp_${fileName}`);
   
   console.log(`Input file: ${inputFile}`);
+  console.log(`Container type: ${containerType}`);
   console.log(`Temp output: ${tempOutput}`);
   console.log('');
   
-  // Find mkvmerge executable
+  // Helper function to resolve binary paths
   function resolveBin(candidates) {
     for (const p of candidates) {
       try { if (fs.existsSync(p)) return p; } catch {}
@@ -54,52 +57,120 @@ module.exports = async (args) => {
     return null;
   }
 
-  const mkvmergeExe =
-    resolveBin([
-      'C:\\Program Files\\MKVToolNix\\mkvmerge.exe',
-      'C:\\Program Files (x86)\\MKVToolNix\\mkvmerge.exe'
-    ]) || 'mkvmerge'; // last resort: PATH
-
-  console.log(`Using mkvmerge: ${mkvmergeExe}`);
-  
-  // Build mkvmerge command
-  let mkvmergeCmd = `"${mkvmergeExe}" -o "${tempOutput}"`;
-  
-  // Add input file without subtitles
-  mkvmergeCmd += ` --no-subtitles "${inputFile}"`;
-  console.log('Removing all original subtitles');
-  
-  // Add converted SRT files
-  if (convertedFiles.length > 0) {
-    console.log(`\nAdding ${convertedFiles.length} converted subtitle(s):`);
-    
-    convertedFiles.forEach(file => {
-      const lang = file.language || 'und';
-      const isDefault = file.trackId === analysis.englishTrackId ? 'yes' : 'no';
-      
-      console.log(`  Track ${file.trackId}:`);
-      console.log(`    File: ${path.basename(file.srtFile)}`);
-      console.log(`    Language: ${lang}`);
-      console.log(`    Default: ${isDefault}`);
-      
-      mkvmergeCmd += ` --language 0:${lang}`;
-      mkvmergeCmd += ` --default-track 0:${isDefault}`;
-      mkvmergeCmd += ` --track-name 0:""`;
-      mkvmergeCmd += ` "${file.srtFile}"`;
-    });
-  }
-  
   try {
-    console.log('\n━━━ Running mkvmerge ━━━');
-    console.log('Command:', mkvmergeCmd);
-    
-    const result = execSync(mkvmergeCmd, {
-      encoding: 'utf8',
-      maxBuffer: 1024 * 1024 * 10
-    });
-    
-    if (result) {
-      console.log('mkvmerge output:', result);
+    if (containerType === 'mkv') {
+      // Use mkvmerge for MKV files
+      const mkvmergeExe =
+        resolveBin([
+          'C:\\Program Files\\MKVToolNix\\mkvmerge.exe',
+          'C:\\Program Files (x86)\\MKVToolNix\\mkvmerge.exe'
+        ]) || 'mkvmerge';
+
+      console.log(`Using mkvmerge: ${mkvmergeExe}`);
+      
+      // Build mkvmerge command
+      let mkvmergeCmd = `"${mkvmergeExe}" -o "${tempOutput}"`;
+      
+      // Add input file without subtitles
+      mkvmergeCmd += ` --no-subtitles "${inputFile}"`;
+      console.log('Removing all original subtitles');
+      
+      // Add converted SRT files
+      if (convertedFiles.length > 0) {
+        console.log(`\nAdding ${convertedFiles.length} converted subtitle(s):`);
+        
+        convertedFiles.forEach(file => {
+          const lang = file.language || 'und';
+          const isDefault = file.trackId === analysis.englishTrackId ? 'yes' : 'no';
+          
+          console.log(`  Track ${file.trackId}:`);
+          console.log(`    File: ${path.basename(file.srtFile)}`);
+          console.log(`    Language: ${lang}`);
+          console.log(`    Default: ${isDefault}`);
+          
+          mkvmergeCmd += ` --language 0:${lang}`;
+          mkvmergeCmd += ` --default-track 0:${isDefault}`;
+          mkvmergeCmd += ` --track-name 0:""`;
+          mkvmergeCmd += ` "${file.srtFile}"`;
+        });
+      }
+      
+      console.log('\n━━━ Running mkvmerge ━━━');
+      console.log('Command:', mkvmergeCmd);
+      
+      const result = execSync(mkvmergeCmd, {
+        encoding: 'utf8',
+        maxBuffer: 1024 * 1024 * 10
+      });
+      
+      if (result) {
+        console.log('mkvmerge output:', result);
+      }
+      
+    } else if (containerType === 'mp4') {
+      // Use ffmpeg for MP4 files
+      const ffmpegExe =
+        resolveBin([
+          'C:\\programdata\\chocolatey\\bin\\ffmpeg.exe',
+          'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe',
+          'C:\\ffmpeg\\bin\\ffmpeg.exe'
+        ]) || 'ffmpeg';
+
+      console.log(`Using ffmpeg: ${ffmpegExe}`);
+      
+      // Build ffmpeg command for MP4
+      let ffmpegCmd = `"${ffmpegExe}" -i "${inputFile}"`;
+      
+      // Map video and audio streams (exclude subtitles)
+      ffmpegCmd += ` -map 0:v -map 0:a`;
+      ffmpegCmd += ` -c:v copy -c:a copy`; // Copy video and audio
+      
+      console.log('Removing all original subtitles');
+      
+      // Add converted SRT files
+      if (convertedFiles.length > 0) {
+        console.log(`\nAdding ${convertedFiles.length} converted subtitle(s):`);
+        
+        convertedFiles.forEach((file, index) => {
+          const lang = file.language || 'und';
+          const isDefault = file.trackId === analysis.englishTrackId;
+          
+          console.log(`  Track ${file.trackId}:`);
+          console.log(`    File: ${path.basename(file.srtFile)}`);
+          console.log(`    Language: ${lang}`);
+          console.log(`    Default: ${isDefault}`);
+          
+          // Add subtitle input
+          ffmpegCmd += ` -i "${file.srtFile}"`;
+          
+          // Map the subtitle stream
+          ffmpegCmd += ` -map ${index + 1}:s`;
+          
+          // Set subtitle codec to mov_text for MP4
+          ffmpegCmd += ` -c:s:${index} mov_text`;
+          
+          // Set metadata
+          ffmpegCmd += ` -metadata:s:s:${index} language=${lang}`;
+          if (isDefault) {
+            ffmpegCmd += ` -disposition:s:${index} default`;
+          }
+        });
+      }
+      
+      // Output options
+      ffmpegCmd += ` -y "${tempOutput}"`;
+      
+      console.log('\n━━━ Running ffmpeg ━━━');
+      console.log('Command:', ffmpegCmd);
+      
+      const result = execSync(ffmpegCmd, {
+        encoding: 'utf8',
+        maxBuffer: 1024 * 1024 * 10
+      });
+      
+      if (result) {
+        console.log('ffmpeg output:', result);
+      }
     }
     
     // Verify output file exists
