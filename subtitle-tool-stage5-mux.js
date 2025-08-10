@@ -220,6 +220,15 @@ module.exports = async (args) => {
       // Update file object to reflect changes
       args.inputFileObj.file_size = outputStats.size / 1024 / 1024; // Convert to MB
       
+      // Mark that subtitle changes were applied - this helps downstream stages
+      // know that the file has been modified and should be considered "processed"
+      args.variables.subtitleChangesApplied = true;
+      
+      // CRITICAL: Set flag to force file replacement even if subsequent stages skip
+      // This ensures that when audio/video stages determine no conversion is needed,
+      // the subtitle-modified cache file still replaces the original library file
+      args.variables.forceReplaceOriginal = true;
+      
     } else {
       throw new Error('Output file was not created');
     }

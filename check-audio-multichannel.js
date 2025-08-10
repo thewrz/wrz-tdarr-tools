@@ -27,6 +27,17 @@ module.exports = async (args) => {
     } else {
       // Stereo or mono audio - already correct, skip processing - output 1
       args.jobLog('🎧 Stereo audio detected - skipping (already optimized)');
+      
+      // CRITICAL: Check if subtitle processing was done and needs file replacement
+      if (args.variables && args.variables.forceReplaceOriginal) {
+        args.jobLog('📝 Subtitle changes detected - forcing file replacement despite audio skip');
+        return {
+          outputFileObj: args.inputFileObj,
+          outputNumber: 3, // Route to "replace original file" instead of skip
+          variables: args.variables,
+        };
+      }
+      
       return {
         outputFileObj: args.inputFileObj,
         outputNumber: 1,
