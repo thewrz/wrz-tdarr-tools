@@ -1,4 +1,4 @@
-// Stage 3: Extract subtitle tracks that need conversion
+// Stage 3: Extract ALL subtitle tracks (for conversion, preservation, or analysis)
 // This block uses mkvextract for MKV or ffmpeg for MP4
 
 module.exports = async (args) => {
@@ -7,7 +7,7 @@ module.exports = async (args) => {
   const fs = require('fs');
   
   console.log('═══════════════════════════════════════');
-  console.log('   STAGE 3: EXTRACT SUBTITLES');
+  console.log('   STAGE 3: EXTRACT ALL SUBTITLES');
   console.log('═══════════════════════════════════════');
   
   // Check if we should skip
@@ -64,9 +64,15 @@ module.exports = async (args) => {
   args.variables.workDir = workDir;
   args.variables.uniqueId = uniqueId;
   
-  // Only extract tracks that need conversion
-  if (analysis.toConvert.length === 0) {
-    console.log('No tracks need extraction (only discarding)');
+  // Extract ALL subtitle tracks (convert + keep + discard for analysis)
+  const allSubtitleTracks = [
+    ...analysis.toConvert,
+    ...analysis.toKeep,
+    ...analysis.toDiscard
+  ];
+  
+  if (allSubtitleTracks.length === 0) {
+    console.log('No subtitle tracks found');
     return {
       outputFileObj: args.inputFileObj,
       outputNumber: 1,
@@ -76,7 +82,7 @@ module.exports = async (args) => {
   
   const containerType = args.variables.containerType || 'mkv';
   console.log(`Container type: ${containerType}`);
-  console.log(`Extracting ${analysis.toConvert.length} subtitle tracks:\n`);
+  console.log(`Extracting ${allSubtitleTracks.length} subtitle tracks:\n`);
   
   // Helper function to resolve binary paths
   function resolveBin(candidates) {
@@ -87,21 +93,35 @@ module.exports = async (args) => {
   }
   
   // Extract each track individually
-  for (const track of analysis.toConvert) {
-    // Determine file extension based on format
+  for (const track of allSubtitleTracks) {
+    // Determine file extension based on format/codec
     let extension = 'sub';
-    if (track.format === 'ass' || track.format === 'ssa') {
-      extension = 'ass';
-    } else if (track.format === 'webvtt') {
-      extension = 'vtt';
-    } else if (track.format === 'mov_text') {
-      extension = 'txt';
+    let trackType = 'convert'; // default
+    
+    // Determine track type and extension
+    if (analysis.toKeep.find(t => t.id === track.id)) {
+      trackType = 'keep';
+      extension = 'srt'; // Already SRT
+    } else if (analysis.toDiscard.find(t => t.id === track.id)) {
+      trackType = 'discard';
+      extension = 'sup'; // Bitmap subtitle
+    } else {
+      // Must be in toConvert
+      trackType = 'convert';
+      if (track.format === 'ass' || track.format === 'ssa') {
+        extension = 'ass';
+      } else if (track.format === 'webvtt') {
+        extension = 'vtt';
+      } else if (track.format === 'mov_text') {
+        extension = 'txt';
+      }
     }
     
     const outputFile = path.join(workDir, `subtitle_${uniqueId}_${track.id}.${extension}`);
     
     console.log(`Extracting Track ${track.id}:`);
-    console.log(`  Format: ${track.format}`);
+    console.log(`  Type: ${trackType}`);
+    console.log(`  Format: ${track.format || track.codec}`);
     console.log(`  Output: ${path.basename(outputFile)}`);
     
     let extractResult;
@@ -257,19 +277,23 @@ module.exports = async (args) => {
       const stats = fs.statSync(outputFile);
       console.log(`  ✓ Extracted successfully: ${stats.size} bytes`);
       
-      // Store info for conversion stage
+      // Store info for conversion/mux stages
       args.variables.extractedFiles.push({
         trackId: track.id,
         inputFile: outputFile,
-        format: track.format,
+        format: track.format || track.codec,
         language: track.language,
-        codec: track.codec
+        codec: track.codec,
+        trackType: trackType, // 'convert', 'keep', or 'discard'
+        extension: extension
       });
     } else {
       console.log(`  ❌ Extraction failed`);
       
-      // IMPORTANT: Don't set skipProcessing here, we want to continue
-      // and remove the problematic subtitle in the remux stage
+      // For bitmap subtitles, extraction failure is expected and OK
+      if (trackType === 'discard') {
+        console.log(`  → This is expected for bitmap subtitles`);
+      }
     }
     
     console.log('');
@@ -277,10 +301,15 @@ module.exports = async (args) => {
   
   // Summary
   console.log('━━━ Extraction Summary ━━━');
-  console.log(`✓ Successfully extracted: ${args.variables.extractedFiles.length}/${analysis.toConvert.length} tracks`);
+  const extracted = args.variables.extractedFiles;
+  const convertCount = extracted.filter(f => f.trackType === 'convert').length;
+  const keepCount = extracted.filter(f => f.trackType === 'keep').length;
+  const discardCount = extracted.filter(f => f.trackType === 'discard').length;
   
-  // Even if extraction failed, we should continue to remove the problematic subtitles
-  // Don't set skipProcessing = true here
+  console.log(`✓ Successfully extracted: ${extracted.length}/${allSubtitleTracks.length} tracks`);
+  console.log(`  - To convert: ${convertCount}`);
+  console.log(`  - To keep (SRT): ${keepCount}`);
+  console.log(`  - Discarded (bitmap): ${discardCount}`);
   
   return {
     outputFileObj: args.inputFileObj,

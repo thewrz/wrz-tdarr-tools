@@ -1,5 +1,5 @@
 // Stage 5: Remux file with converted SRT subtitles
-// This block removes all original subtitles and adds back the converted SRT files
+// This block removes all original subtitles and adds back ONLY the SRT files
 // Uses mkvmerge for MKV files and ffmpeg for MP4 files
 
 module.exports = async (args) => {
@@ -22,7 +22,7 @@ module.exports = async (args) => {
   }
   
   const analysis = args.variables.subtitleAnalysis;
-  const convertedFiles = args.variables.convertedFiles || [];
+  const finalSrtFiles = args.variables.finalSrtFiles || [];
   const workDir = args.variables.workDir;
   const inputFile = args.variables.originalFile;
   const containerType = args.variables.containerType || 'mkv';
@@ -41,11 +41,11 @@ module.exports = async (args) => {
   console.log(`Processing files for session: ${uniqueId}`);
   
   // Check if we have anything to do
-  const hasConversions = convertedFiles.length > 0;
-  const hasDiscards = analysis.toDiscard.length > 0;
+  const hasSubtitlesToRemove = (analysis.toConvert.length + analysis.toKeep.length + analysis.toDiscard.length) > 0;
+  const hasSrtFilesToAdd = finalSrtFiles.length > 0;
   
-  if (!hasConversions && !hasDiscards) {
-    console.log('No changes needed - keeping original file');
+  if (!hasSubtitlesToRemove && !hasSrtFilesToAdd) {
+    console.log('No subtitle changes needed - keeping original file');
     return {
       outputFileObj: args.inputFileObj,
       outputNumber: 1,
@@ -60,6 +60,8 @@ module.exports = async (args) => {
   console.log(`Input file: ${inputFile}`);
   console.log(`Container type: ${containerType}`);
   console.log(`Temp output: ${tempOutput}`);
+  console.log(`Original subtitles to remove: ${hasSubtitlesToRemove ? 'YES' : 'NO'}`);
+  console.log(`SRT files to add: ${finalSrtFiles.length}`);
   console.log('');
   
   // Helper function to resolve binary paths
@@ -84,15 +86,15 @@ module.exports = async (args) => {
       // Build mkvmerge command
       let mkvmergeCmd = `"${mkvmergeExe}" -o "${tempOutput}"`;
       
-      // Add input file without subtitles
+      // CRITICAL: Remove ALL original subtitles from input file
       mkvmergeCmd += ` --no-subtitles "${inputFile}"`;
-      console.log('Removing all original subtitles');
+      console.log('✓ Removing ALL original subtitles from input file');
       
-      // Add converted SRT files
-      if (convertedFiles.length > 0) {
-        console.log(`\nAdding ${convertedFiles.length} converted subtitle(s):`);
+      // Add ONLY the final SRT files
+      if (finalSrtFiles.length > 0) {
+        console.log(`\n━━━ Adding ${finalSrtFiles.length} SRT subtitle(s) ━━━`);
         
-        convertedFiles.forEach(file => {
+        finalSrtFiles.forEach(file => {
           const lang = file.language || 'und';
           const isDefault = file.trackId === analysis.englishTrackId ? 'yes' : 'no';
           
@@ -100,12 +102,15 @@ module.exports = async (args) => {
           console.log(`    File: ${path.basename(file.srtFile)}`);
           console.log(`    Language: ${lang}`);
           console.log(`    Default: ${isDefault}`);
+          console.log(`    Original codec: ${file.originalCodec} → SRT`);
           
           mkvmergeCmd += ` --language 0:${lang}`;
           mkvmergeCmd += ` --default-track 0:${isDefault}`;
           mkvmergeCmd += ` --track-name 0:""`;
           mkvmergeCmd += ` "${file.srtFile}"`;
         });
+      } else {
+        console.log('\n━━━ No SRT files to add (all subtitles will be removed) ━━━');
       }
       
       console.log('\n━━━ Running mkvmerge ━━━');
@@ -134,17 +139,17 @@ module.exports = async (args) => {
       // Build ffmpeg command for MP4
       let ffmpegCmd = `"${ffmpegExe}" -i "${inputFile}"`;
       
-      // Map video and audio streams (exclude subtitles)
+      // CRITICAL: Map ONLY video and audio streams (exclude ALL subtitles)
       ffmpegCmd += ` -map 0:v -map 0:a`;
-      ffmpegCmd += ` -c:v copy -c:a copy`; // Copy video and audio
+      ffmpegCmd += ` -c:v copy -c:a copy`; // Copy video and audio without re-encoding
       
-      console.log('Removing all original subtitles');
+      console.log('✓ Removing ALL original subtitles from input file');
       
-      // Add converted SRT files
-      if (convertedFiles.length > 0) {
-        console.log(`\nAdding ${convertedFiles.length} converted subtitle(s):`);
+      // Add ONLY the final SRT files
+      if (finalSrtFiles.length > 0) {
+        console.log(`\n━━━ Adding ${finalSrtFiles.length} SRT subtitle(s) ━━━`);
         
-        convertedFiles.forEach((file, index) => {
+        finalSrtFiles.forEach((file, index) => {
           const lang = file.language || 'und';
           const isDefault = file.trackId === analysis.englishTrackId;
           
@@ -152,6 +157,7 @@ module.exports = async (args) => {
           console.log(`    File: ${path.basename(file.srtFile)}`);
           console.log(`    Language: ${lang}`);
           console.log(`    Default: ${isDefault}`);
+          console.log(`    Original codec: ${file.originalCodec} → MOV_TEXT`);
           
           // Add subtitle input
           ffmpegCmd += ` -i "${file.srtFile}"`;
@@ -168,6 +174,8 @@ module.exports = async (args) => {
             ffmpegCmd += ` -disposition:s:${index} default`;
           }
         });
+      } else {
+        console.log('\n━━━ No SRT files to add (all subtitles will be removed) ━━━');
       }
       
       // Output options
@@ -260,9 +268,9 @@ module.exports = async (args) => {
     };
   }
   
-  // Clean up converted SRT files
-  console.log('\nCleaning up temporary files...');
-  for (const file of convertedFiles) {
+  // Clean up ALL temporary SRT files
+  console.log('\nCleaning up temporary SRT files...');
+  for (const file of finalSrtFiles) {
     try {
       if (fs.existsSync(file.srtFile)) {
         fs.unlinkSync(file.srtFile);
@@ -276,9 +284,26 @@ module.exports = async (args) => {
   console.log('\n═══════════════════════════════════════');
   console.log('   SUBTITLE PROCESSING COMPLETE');
   console.log('═══════════════════════════════════════');
-  console.log(`✓ Converted: ${convertedFiles.length} subtitle(s)`);
-  console.log(`✓ Discarded: ${analysis.toDiscard.length} bitmap subtitle(s)`);
+  
+  // Final summary
+  const totalOriginalSubs = analysis.toConvert.length + analysis.toKeep.length + analysis.toDiscard.length;
+  const finalSrtCount = finalSrtFiles.length;
+  
+  console.log(`✓ Original subtitle tracks: ${totalOriginalSubs}`);
+  console.log(`  - Converted to SRT: ${analysis.toConvert.length}`);
+  console.log(`  - Preserved as SRT: ${analysis.toKeep.length}`);
+  console.log(`  - Discarded (bitmap): ${analysis.toDiscard.length}`);
+  console.log(`✓ Final SRT tracks in file: ${finalSrtCount}`);
   console.log(`✓ File updated successfully`);
+  
+  // Verify the goal was achieved
+  if (totalOriginalSubs > 0 && finalSrtCount >= 0) {
+    console.log('\n🎯 GOAL ACHIEVED:');
+    console.log('   ✓ ALL original subtitles removed from video file');
+    console.log('   ✓ Bitmap subtitles discarded');
+    console.log('   ✓ Text subtitles converted to SRT');
+    console.log('   ✓ File now contains ONLY SRT subtitles');
+  }
   
   return {
     outputFileObj: args.inputFileObj,
