@@ -27,11 +27,44 @@ module.exports = async (args) => {
 
     args.jobLog(`✓ Found ${audioStreams.length} audio streams`);
 
-    // Analyze audio streams by language
+    // Enhanced commentary detection patterns
+    const commentaryPatterns = [
+      /commentary/i,
+      /director.?s?\s+commentary/i,
+      /cast\s+commentary/i,
+      /production.*commentary/i,
+      /design.*commentary/i,
+      /audio\s+commentary/i,
+      /filmmaker.*commentary/i,
+      /writer.*commentary/i,
+      /producer.*commentary/i,
+      /behind.*scenes/i,
+      /making.*of/i,
+      /^commentary$/i,
+      /\bcomm\b/i,  // common abbreviation
+      /director.*track/i,
+      /bonus.*audio/i,
+      /audio\s+description/i,
+      /descriptive\s+audio/i,
+      /described\s+video/i,
+      /\bad\b/i,  // audio description abbreviation
+      /vision.*impaired/i,
+      /accessibility/i
+    ];
+
+    function isCommentaryTrack(trackName, handlerName = '') {
+      const textToCheck = `${trackName} ${handlerName}`.toLowerCase().trim();
+      if (!textToCheck) return false;
+      
+      return commentaryPatterns.some(pattern => pattern.test(textToCheck));
+    }
+
+    // Analyze audio streams by language and filter out commentary
     const analysis = {
       englishStreams: [],
       otherLanguageStreams: [],
-      undefinedStreams: []
+      undefinedStreams: [],
+      commentaryStreams: []
     };
 
     args.jobLog('━━━ Analyzing Audio Streams ━━━');
@@ -41,8 +74,12 @@ module.exports = async (args) => {
       const language = (tags.language || 'und').toLowerCase();
       const channels = stream.channels || 0;
       const codec = stream.codec_name || 'unknown';
+      const trackName = tags.title || tags.name || tags.handler_name || '';
       
       args.jobLog(`Stream ${index}: ${codec} (${channels}ch) - ${language}`);
+      if (trackName) {
+        args.jobLog(`  Title: "${trackName}"`);
+      }
 
       const streamInfo = {
         index: stream.index,
@@ -50,10 +87,15 @@ module.exports = async (args) => {
         language: language,
         channels: channels,
         codec: codec,
+        trackName: trackName,
         stream: stream
       };
 
-      if (language === 'eng' || language === 'en' || language === 'english' || language === 'en-US' || language === 'en-GB') {
+      // Check if this is a commentary or audio description track
+      if (isCommentaryTrack(trackName)) {
+        analysis.commentaryStreams.push(streamInfo);
+        args.jobLog(`  → Commentary/Audio Description detected - will be removed`);
+      } else if (language === 'eng' || language === 'en' || language === 'english') {
         analysis.englishStreams.push(streamInfo);
         args.jobLog(`  → English stream detected`);
       } else if (language === 'und' || language === 'undefined') {
@@ -64,6 +106,14 @@ module.exports = async (args) => {
         args.jobLog(`  → Other language stream (${language})`);
       }
     });
+
+    // Log commentary detection results
+    if (analysis.commentaryStreams.length > 0) {
+      args.jobLog(`🎯 Found ${analysis.commentaryStreams.length} commentary/audio description track(s) to remove:`);
+      analysis.commentaryStreams.forEach(track => {
+        args.jobLog(`  - Stream ${track.streamIndex}: "${track.trackName}" (${track.language})`);
+      });
+    }
 
     args.jobLog('━━━ Processing Decision ━━━');
     
@@ -77,9 +127,15 @@ module.exports = async (args) => {
       };
     }
 
-    // Skip if no English streams found
-    if (analysis.englishStreams.length === 0) {
-      args.jobLog('⚠️ No English audio streams found - skipping');
+    // Check if we need processing (duplicates or commentary)
+    const needsProcessing = analysis.englishStreams.length > 1 || analysis.commentaryStreams.length > 0;
+
+    if (!needsProcessing) {
+      if (analysis.englishStreams.length === 0) {
+        args.jobLog('⚠️ No English audio streams found - skipping');
+      } else if (analysis.englishStreams.length === 1 && analysis.commentaryStreams.length === 0) {
+        args.jobLog('✓ Only one English audio stream and no commentary - no processing needed');
+      }
       return {
         outputFileObj: args.inputFileObj,
         outputNumber: 2, // Skip processing
@@ -87,28 +143,29 @@ module.exports = async (args) => {
       };
     }
 
-    // Skip if only one English stream (no duplicates)
-    if (analysis.englishStreams.length === 1) {
-      args.jobLog('✓ Only one English audio stream - no deduplication needed');
-      return {
-        outputFileObj: args.inputFileObj,
-        outputNumber: 2, // Skip processing
-        variables: args.variables,
-      };
+    // Processing needed - either duplicates or commentary removal
+    if (analysis.englishStreams.length > 1) {
+      args.jobLog(`🔄 Multiple English streams detected (${analysis.englishStreams.length}) - deduplication needed`);
     }
-
-    // Multiple English streams detected - processing needed
-    args.jobLog(`🔄 Multiple English streams detected (${analysis.englishStreams.length}) - deduplication needed`);
+    if (analysis.commentaryStreams.length > 0) {
+      args.jobLog(`🔄 Commentary/Audio Description tracks detected (${analysis.commentaryStreams.length}) - removal needed`);
+    }
     
     // Determine streams to keep/remove
     const streamsToKeep = [];
     streamsToKeep.push(analysis.englishStreams[0]); // Keep first English stream
     streamsToKeep.push(...analysis.otherLanguageStreams); // Keep all other languages
-    const streamsToRemove = analysis.englishStreams.slice(1); // Remove duplicate English streams
+    // Note: Commentary streams are automatically excluded from streamsToKeep
+    
+    const streamsToRemove = [
+      ...analysis.englishStreams.slice(1), // Remove duplicate English streams
+      ...analysis.commentaryStreams // Remove all commentary streams
+    ];
 
     args.jobLog(`✓ Keeping first English stream (index ${analysis.englishStreams[0].index})`);
     args.jobLog(`✓ Keeping ${analysis.otherLanguageStreams.length} other language streams`);
-    args.jobLog(`❌ Removing ${streamsToRemove.length} duplicate English streams`);
+    args.jobLog(`❌ Removing ${analysis.englishStreams.length - 1} duplicate English streams`);
+    args.jobLog(`❌ Removing ${analysis.commentaryStreams.length} commentary/audio description streams`);
 
     // Determine container type and processing method
     const inputFile = args.inputFileObj._id;
@@ -411,7 +468,9 @@ module.exports = async (args) => {
       const newVariables = { ...args.variables };
       newVariables.audioDeduplicationApplied = true;
       newVariables.originalFile = inputFile;
-      newVariables.englishStreamsRemoved = streamsToRemove.length;
+      newVariables.englishStreamsRemoved = analysis.englishStreams.length - 1;
+      newVariables.commentaryStreamsRemoved = analysis.commentaryStreams.length;
+      newVariables.totalStreamsRemoved = streamsToRemove.length;
       newVariables.totalStreamsKept = streamsToKeep.length;
       
       // CRITICAL: Set flag to force file replacement even if subsequent stages skip
@@ -422,8 +481,14 @@ module.exports = async (args) => {
       args.jobLog('\n═══════════════════════════════════════');
       args.jobLog('   AUDIO PROCESSING COMPLETE');
       args.jobLog('═══════════════════════════════════════');
-      args.jobLog(`✓ Removed: ${streamsToRemove.length} duplicate English stream(s)`);
-      args.jobLog(`✓ Kept: ${streamsToKeep.length} total stream(s)`);
+      if (analysis.englishStreams.length > 1) {
+        args.jobLog(`✓ Removed: ${analysis.englishStreams.length - 1} duplicate English stream(s)`);
+      }
+      if (analysis.commentaryStreams.length > 0) {
+        args.jobLog(`✓ Removed: ${analysis.commentaryStreams.length} commentary/audio description stream(s)`);
+      }
+      args.jobLog(`✓ Total streams removed: ${streamsToRemove.length}`);
+      args.jobLog(`✓ Total streams kept: ${streamsToKeep.length}`);
       args.jobLog(`✓ File updated successfully`);
       
       return {
