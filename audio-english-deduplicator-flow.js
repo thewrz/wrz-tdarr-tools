@@ -362,9 +362,9 @@ module.exports = async (args) => {
     // MKVToolsNix processing function
     async function processWithMKVToolsNix(mkvmergePath) {
       return new Promise((resolve) => {
-        // Build audio track selection - use streamIndex for mkvmerge
+        // Build audio track selection - use actual stream index for mkvmerge
         const audioTracks = streamsToKeep
-          .map(stream => stream.streamIndex)
+          .map(stream => stream.index)
           .join(',');
 
         const mkvArgs = [
