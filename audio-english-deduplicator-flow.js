@@ -228,6 +228,16 @@ module.exports = async (args) => {
       };
     }
 
+    // Additional safety check: ensure we have streams to keep
+    if (analysis.englishStreams.length === 0 && analysis.otherLanguageStreams.length === 0 && analysis.undefinedStreams.length === 0) {
+      args.jobLog('❌ No valid audio streams found to keep - this should not happen');
+      return {
+        outputFileObj: args.inputFileObj,
+        outputNumber: 3, // Error
+        variables: args.variables,
+      };
+    }
+
     // Processing needed - either duplicates or commentary removal
     if (analysis.englishStreams.length > 1) {
       args.jobLog(`🔄 Multiple English streams detected (${analysis.englishStreams.length}) - deduplication needed`);
@@ -239,8 +249,11 @@ module.exports = async (args) => {
     // Determine streams to keep/remove with English stream first
     const streamsToKeep = [];
     
-    // Always put the English stream first
-    streamsToKeep.push(analysis.englishStreams[0]); // Keep first English stream as primary
+    // Safety check: ensure we have English streams before accessing
+    if (analysis.englishStreams.length > 0) {
+      // Always put the English stream first
+      streamsToKeep.push(analysis.englishStreams[0]); // Keep first English stream as primary
+    }
     
     // Add other language streams after English
     streamsToKeep.push(...analysis.otherLanguageStreams); // Keep all other languages
@@ -255,7 +268,9 @@ module.exports = async (args) => {
       ...analysis.commentaryStreams // Remove all commentary streams
     ];
 
-    args.jobLog(`✓ Keeping first English stream (index ${analysis.englishStreams[0].index}) - will be positioned as first audio track`);
+    if (analysis.englishStreams.length > 0) {
+      args.jobLog(`✓ Keeping first English stream (index ${analysis.englishStreams[0].index}) - will be positioned as first audio track`);
+    }
     args.jobLog(`✓ Keeping ${analysis.otherLanguageStreams.length} other language streams`);
     if (analysis.undefinedStreams.length > 0) {
       args.jobLog(`✓ Keeping ${analysis.undefinedStreams.length} undefined language streams`);
@@ -274,12 +289,23 @@ module.exports = async (args) => {
     args.jobLog(`Processing method: ${isMKV ? 'MKVToolsNix' : 'FFmpeg'}`);
 
     // Determine working directory - use the cache directory from library settings
-    let workDir = 'Y:/cache'; // Default from your log
+    let workDir = 'Y:/cache'; // Default fallback
     
     // Try to get from library settings first
     if (args.librarySettings && args.librarySettings.cache) {
       workDir = args.librarySettings.cache;
     }
+    
+    // Fix malformed cache paths (like 'Y:Y:/cache' -> 'Y:/cache')
+    if (workDir.includes('Y:Y:/')) {
+      workDir = workDir.replace('Y:Y:/', 'Y:/');
+      args.jobLog(`Fixed malformed cache path to: ${workDir}`);
+    }
+    
+    // Handle Tdarr's cache workflow - work with the current file (which may already be a cache file)
+    // Tdarr automatically handles cache file creation and replacement
+    const currentFile = args.inputFileObj._id;
+    args.jobLog(`Current working file: ${currentFile}`);
     
     // Ensure working directory exists
     try {
@@ -362,18 +388,61 @@ module.exports = async (args) => {
     // MKVToolsNix processing function
     async function processWithMKVToolsNix(mkvmergePath) {
       return new Promise((resolve) => {
-        // Build audio track selection - use actual stream index for mkvmerge
-        const audioTracks = streamsToKeep
-          .map(stream => stream.index)
-          .join(',');
+        // For MKV files, we need to map FFprobe stream indices to mkvmerge track IDs
+        // Get mkvmerge track info from variables (set by subtitle tools)
+        const mkvTracks = args.variables.mkvTracks || [];
+        
+        if (mkvTracks.length === 0) {
+          args.jobLog('❌ No mkvmerge track information available - falling back to FFmpeg');
+          resolve({ success: false, error: 'No mkvmerge track information' });
+          return;
+        }
+        
+        // Map FFprobe audio streams to mkvmerge track IDs
+        const audioTrackIds = [];
+        
+        streamsToKeep.forEach(streamToKeep => {
+          // Find corresponding mkvmerge track by matching the stream index from FFprobe
+          // Note: FFprobe stream.index corresponds to the actual stream index in the file
+          const mkvTrack = mkvTracks.find(track => 
+            track.type === 'audio' && 
+            track.id === streamToKeep.index
+          );
+          
+          if (mkvTrack) {
+            audioTrackIds.push(mkvTrack.id);
+            args.jobLog(`✓ Mapping FFprobe stream ${streamToKeep.index} to mkvmerge track ${mkvTrack.id}`);
+          } else {
+            // Try alternative mapping by stream position
+            const audioStreamsInMkv = mkvTracks.filter(t => t.type === 'audio');
+            const streamPosition = streamToKeep.streamIndex; // 0-based position in audio streams
+            
+            if (streamPosition < audioStreamsInMkv.length) {
+              const alternativeTrack = audioStreamsInMkv[streamPosition];
+              audioTrackIds.push(alternativeTrack.id);
+              args.jobLog(`✓ Alternative mapping: FFprobe stream ${streamToKeep.index} (pos ${streamPosition}) to mkvmerge track ${alternativeTrack.id}`);
+            } else {
+              args.jobLog(`❌ Could not find mkvmerge track for FFprobe stream ${streamToKeep.index} (pos ${streamPosition})`);
+            }
+          }
+        });
+        
+        if (audioTrackIds.length === 0) {
+          args.jobLog('❌ No valid audio track IDs found for mkvmerge - falling back to FFmpeg');
+          resolve({ success: false, error: 'No valid audio track IDs' });
+          return;
+        }
+        
+        const audioTracks = audioTrackIds.join(',');
 
         const mkvArgs = [
           '-o', tempOutput,
+          '--verbose',
           '--audio-tracks', audioTracks,
-          '--video-tracks', 'all',
-          '--subtitle-tracks', 'all',
-          '--chapters', 'all',
-          '--attachments', 'all',
+          // '--video-tracks', 'all',
+          // '--subtitle-tracks', 'all',
+          // '--chapters', 'all',
+          // '--attachments', 'all',
           inputFile
         ];
 
@@ -392,11 +461,15 @@ module.exports = async (args) => {
         }, 300000); // 5 minutes timeout
 
         process.stdout.on('data', (data) => {
-          stdoutData += data.toString();
+          const text = data.toString();
+          stdoutData += text;
+          args.jobLog(text.trim());
         });
 
         process.stderr.on('data', (data) => {
-          stderrData += data.toString();
+          const text = data.toString();
+          stderrData += text;
+          args.jobLog(text.trim());
         });
 
         process.on('close', (code) => {
