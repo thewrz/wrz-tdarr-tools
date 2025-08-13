@@ -53,7 +53,7 @@ module.exports = async (args) => {
         stream: stream
       };
 
-      if (language === 'eng' || language === 'en' || language === 'english') {
+      if (language === 'eng' || language === 'en' || language === 'english' || language === 'en-US' || language === 'en-GB') {
         analysis.englishStreams.push(streamInfo);
         args.jobLog(`  → English stream detected`);
       } else if (language === 'und' || language === 'undefined') {
@@ -120,6 +120,31 @@ module.exports = async (args) => {
     args.jobLog(`Container: ${container}, Extension: ${ext}`);
     args.jobLog(`Processing method: ${isMKV ? 'MKVToolsNix' : 'FFmpeg'}`);
 
+    // Determine working directory - use the cache directory from library settings
+    let workDir = 'Y:/cache'; // Default from your log
+    
+    // Try to get from library settings first
+    if (args.librarySettings && args.librarySettings.cache) {
+      workDir = args.librarySettings.cache;
+    }
+    
+    // Ensure working directory exists
+    try {
+      if (!fs.existsSync(workDir)) {
+        fs.mkdirSync(workDir, { recursive: true });
+        args.jobLog(`Created working directory: ${workDir}`);
+      }
+    } catch (error) {
+      args.jobLog(`❌ Failed to create working directory: ${error.message}`);
+      return {
+        outputFileObj: args.inputFileObj,
+        outputNumber: 3, // Error
+        variables: args.variables,
+      };
+    }
+    
+    args.jobLog(`Working directory: ${workDir}`);
+
     // Helper function to resolve binary paths
     function resolveBin(candidates) {
       for (const p of candidates) {
@@ -130,19 +155,20 @@ module.exports = async (args) => {
       return null;
     }
 
-    // Generate output filename
-    const inputDir = path.dirname(inputFile);
-    const inputName = path.basename(inputFile, path.extname(inputFile));
-    const inputExt = path.extname(inputFile);
-    
-    // Create unique identifier for this processing session
+    // Create unique identifier for this processing session to avoid conflicts
     const inputFileHash = crypto.createHash('md5').update(inputFile).digest('hex').substring(0, 8);
+    const processId = process.pid;
     const timestamp = Date.now();
-    const uniqueId = `${inputFileHash}_${timestamp}`;
+    const uniqueId = `${inputFileHash}_${processId}_${timestamp}`;
     
-    const outputFile = path.join(inputDir, `${inputName}_audio_dedup_${uniqueId}${inputExt}`);
+    args.jobLog(`Unique processing ID: ${uniqueId}`);
     
-    args.jobLog(`Output file: ${outputFile}`);
+    // Create temp output file path with unique ID to prevent conflicts
+    const fileName = path.basename(inputFile);
+    const tempOutput = path.join(workDir, `temp_${uniqueId}_${fileName}`);
+    
+    args.jobLog(`Input file: ${inputFile}`);
+    args.jobLog(`Temp output: ${tempOutput}`);
 
     let processingResult;
 
@@ -189,7 +215,7 @@ module.exports = async (args) => {
           .join(',');
 
         const mkvArgs = [
-          '-o', outputFile,
+          '-o', tempOutput,
           '--audio-tracks', audioTracks,
           '--video-tracks', 'all',
           '--subtitle-tracks', 'all',
@@ -234,7 +260,7 @@ module.exports = async (args) => {
             resolve({ success: false, error: stderrData });
           } else {
             args.jobLog('✓ Processing completed successfully');
-            resolve({ success: true, outputFile: outputFile });
+            resolve({ success: true, outputFile: tempOutput });
           }
         });
 
@@ -283,7 +309,7 @@ module.exports = async (args) => {
           ...mapArgs,
           '-c', 'copy', // Copy all streams without re-encoding
           '-y', // Overwrite output file
-          outputFile
+          tempOutput
         ];
 
         args.jobLog(`Command: ffmpeg ${ffmpegArgs.join(' ')}`);
@@ -322,7 +348,7 @@ module.exports = async (args) => {
             resolve({ success: false, error: stderrData });
           } else {
             args.jobLog('✓ Processing completed successfully');
-            resolve({ success: true, outputFile: outputFile });
+            resolve({ success: true, outputFile: tempOutput });
           }
         });
 
@@ -334,32 +360,90 @@ module.exports = async (args) => {
       });
     }
 
-    // Check processing result
+    // Check processing result and replace original file
     if (processingResult && processingResult.success && fs.existsSync(processingResult.outputFile)) {
-      const stats = fs.statSync(processingResult.outputFile);
-      args.jobLog(`✓ Output file created: ${stats.size} bytes`);
+      const inputStats = fs.statSync(inputFile);
+      const outputStats = fs.statSync(processingResult.outputFile);
       
-      // Update the file object to point to the new file
-      const newFileObj = { ...args.inputFileObj };
-      newFileObj._id = processingResult.outputFile;
-      newFileObj.file = processingResult.outputFile;
+      args.jobLog('\n✓ Processing complete');
+      args.jobLog(`  Original size: ${(inputStats.size / 1024 / 1024).toFixed(2)} MB`);
+      args.jobLog(`  New size: ${(outputStats.size / 1024 / 1024).toFixed(2)} MB`);
       
-      // Store processing info in variables
+      // Replace original file with new one
+      args.jobLog('\nReplacing original file...');
+      
+      // Use copy + delete approach for cross-device compatibility
+      try {
+        // Copy temp file to original location
+        fs.copyFileSync(processingResult.outputFile, inputFile);
+        args.jobLog('✓ File copied to original location');
+        
+        // Delete temp file after successful copy
+        fs.unlinkSync(processingResult.outputFile);
+        args.jobLog('✓ Temporary file cleaned up');
+        
+        args.jobLog('✓ File replaced successfully');
+      } catch (copyError) {
+        args.jobLog(`❌ Failed to replace original file: ${copyError.message}`);
+        
+        // Clean up temp file if it exists
+        if (fs.existsSync(processingResult.outputFile)) {
+          try {
+            fs.unlinkSync(processingResult.outputFile);
+            args.jobLog('✓ Cleaned up temporary file');
+          } catch (cleanupError) {
+            args.jobLog('⚠️ Could not clean up temporary file');
+          }
+        }
+        
+        return {
+          outputFileObj: args.inputFileObj,
+          outputNumber: 3, // Error - route to error handling
+          variables: args.variables,
+        };
+      }
+      
+      // Update file object to reflect changes
+      args.inputFileObj.file_size = outputStats.size / 1024 / 1024; // Convert to MB
+      
+      // Mark that audio changes were applied - this helps downstream stages
+      // know that the file has been modified and should be considered "processed"
       const newVariables = { ...args.variables };
       newVariables.audioDeduplicationApplied = true;
       newVariables.originalFile = inputFile;
       newVariables.englishStreamsRemoved = streamsToRemove.length;
       newVariables.totalStreamsKept = streamsToKeep.length;
       
-      args.jobLog('🎉 Audio deduplication completed successfully!');
+      // CRITICAL: Set flag to force file replacement even if subsequent stages skip
+      // This ensures that when other stages determine no conversion is needed,
+      // the audio-modified cache file still replaces the original library file
+      newVariables.forceReplaceOriginal = true;
+      
+      args.jobLog('\n═══════════════════════════════════════');
+      args.jobLog('   AUDIO PROCESSING COMPLETE');
+      args.jobLog('═══════════════════════════════════════');
+      args.jobLog(`✓ Removed: ${streamsToRemove.length} duplicate English stream(s)`);
+      args.jobLog(`✓ Kept: ${streamsToKeep.length} total stream(s)`);
+      args.jobLog(`✓ File updated successfully`);
       
       return {
-        outputFileObj: newFileObj,
+        outputFileObj: args.inputFileObj,
         outputNumber: 1, // Success - continue to next plugin
         variables: newVariables,
       };
     } else {
       args.jobLog('❌ Processing failed');
+      
+      // Clean up temp file if it exists
+      if (fs.existsSync(tempOutput)) {
+        try {
+          fs.unlinkSync(tempOutput);
+          args.jobLog('✓ Cleaned up temporary file');
+        } catch (cleanupError) {
+          args.jobLog('⚠️ Could not clean up temporary file');
+        }
+      }
+      
       return {
         outputFileObj: args.inputFileObj,
         outputNumber: 3, // Error - route to error handling

@@ -14,16 +14,16 @@ This toolkit provides:
 
 ```
 wrz-tdarr-tools/
+├── custom-js-check-audio-duplicates.js  # Custom JS: Analysis and routing
+├── custom-js-audio-deduplicator.js      # Custom JS: Complete processing
 ├── check-audio-english-duplicates.js    # Flow plugin: Analysis and routing
 ├── audio-english-deduplicator-flow.js   # Flow plugin: Complete processing
-├── test-flow-plugins.js                 # Test suite for flow plugins
 ├── audio-english-deduplicator.js        # Legacy: Core analysis tool
 ├── audio-english-processor.js           # Legacy: Core processing tool
-├── audio-channel-manager.js             # Legacy: CLI tool for generating plugins
-├── test-audio-tools.js                  # Legacy: Test suite
 ├── check-audio-language.js              # Existing language detection tool
 ├── check-audio-multichannel.js          # Existing multichannel detection tool
 ├── subtitle-tool-stage*.js              # Existing subtitle management tools
+├── CUSTOM-JS-USAGE-GUIDE.md             # Complete setup guide for Custom JS
 └── README.md                            # This documentation
 ```
 
@@ -45,61 +45,35 @@ wrz-tdarr-tools/
 
 📖 **See detailed instructions**: [CUSTOM-JS-USAGE-GUIDE.md](CUSTOM-JS-USAGE-GUIDE.md)
 
-### Option 2: Use Flow Plugins (File-based)
+### Option 2: Use Individual Custom JS Functions
 
-```bash
-# Test the flow plugins
-node test-flow-plugins.js
+All these files can be pasted directly into Custom JS Function blocks:
 
-# Copy flow plugins to your Tdarr Flow plugins directory
-# - check-audio-english-duplicates.js (analysis/routing)
-# - audio-english-deduplicator-flow.js (processing)
-```
+- `audio-english-deduplicator.js` - Analysis and routing
+- `audio-english-processor.js` - Processing with external tools
+- `check-audio-english-duplicates.js` - Lightweight analysis
+- `audio-english-deduplicator-flow.js` - All-in-one processing
 
-### Option 3: Generate Legacy Plugins
+### Option 3: Use as Flow Plugins (File-based)
 
-```bash
-# Interactive mode (recommended for first-time users)
-node audio-channel-manager.js --interactive
-
-# Direct mode with default settings
-node audio-channel-manager.js
-
-# Custom output directory and tool preference
-node audio-channel-manager.js --output ./my-plugins --tool mkvtoolnix
-
-# Preview without creating files
-node audio-channel-manager.js --dry-run --verbose
-```
-
-### Testing the Tools
-
-```bash
-# Test flow plugins
-node test-flow-plugins.js
-
-# Test legacy tools
-node test-audio-tools.js
-```
+Copy these files to your Tdarr Flow plugins directory:
+- `check-audio-english-duplicates.js` (analysis/routing)
+- `audio-english-deduplicator-flow.js` (complete processing)
+- `audio-english-deduplicator.js` (legacy analysis)
+- `audio-english-processor.js` (legacy processing)
 
 ### Installation Options
 
 **For Custom JS Functions (Recommended):**
-1. Open `custom-js-check-audio-duplicates.js` and `custom-js-audio-deduplicator.js`
+1. Open any of the audio processing files
 2. Create "Custom JS Function" blocks in Tdarr Flow
 3. Copy/paste the code into the respective blocks
 4. Configure outputs and connect blocks as described in the usage guide
 
 **For Flow Plugins:**
-1. Copy `check-audio-english-duplicates.js` and `audio-english-deduplicator-flow.js` to your Tdarr Flow plugins directory
+1. Copy desired `.js` files to your Tdarr Flow plugins directory
 2. Create a flow using these plugins as blocks
 3. Connect outputs appropriately (see Flow Setup below)
-
-**For Legacy Plugins:**
-1. Copy generated plugins to your Tdarr plugins directory
-2. Restart Tdarr Server
-3. Create a flow using the generated plugins
-4. Test with sample files
 
 ## 🔧 Tools Description
 
@@ -174,38 +148,30 @@ node test-audio-tools.js
 - **MP4 files**: FFmpeg
 - **Fallback**: Automatic fallback to FFmpeg if MKVToolsNix unavailable
 
-### Audio Channel Manager (`audio-channel-manager.js`)
+### Custom JS Functions
 
-**Purpose**: CLI tool for generating customized Tdarr plugins
+#### Custom JS Check Audio Duplicates (`custom-js-check-audio-duplicates.js`)
+
+**Purpose**: Custom JS Function for analysis and routing based on English audio stream count
 
 **Features**:
-- Interactive and direct modes
-- Configurable tool preferences
-- Dry-run preview capability
-- Comprehensive documentation generation
-- Multiple output formats
+- Paste directly into Tdarr Custom JS Function blocks
+- Lightweight analysis only
+- Sets flow variables for downstream blocks
+- Detailed logging of stream analysis
+- No file copying required
 
-**Options**:
-```bash
--h, --help          Show help message
--i, --interactive   Run in interactive mode
--o, --output DIR    Output directory for plugins
--t, --tool TOOL     Preferred tool (mkvtoolnix|ffmpeg|auto)
--d, --dry-run       Preview without creating files
--v, --verbose       Enable verbose logging
-```
+#### Custom JS Audio Deduplicator (`custom-js-audio-deduplicator.js`)
 
-### Test Suite (`test-audio-tools.js`)
+**Purpose**: Complete processing Custom JS Function that removes duplicate English audio streams
 
-**Purpose**: Validates tool functionality across various scenarios
-
-**Test Scenarios**:
-- Multiple English streams (should process)
-- Single English stream (should skip)
-- No English streams (should skip)
-- Undefined language streams (should skip)
-- No audio streams (should skip)
-- Complex multi-language scenarios
+**Features**:
+- Paste directly into Tdarr Custom JS Function blocks
+- All-in-one analysis and processing
+- Keeps first English audio track
+- Preserves all other language tracks
+- Uses MKVToolsNix for MKV, FFmpeg for MP4
+- No file copying required
 
 ## 📋 Processing Logic
 
@@ -389,42 +355,28 @@ Legacy tools use these variables:
 
 ## 🧪 Testing
 
-### Running Tests
+### Manual Testing
 
-```bash
-# Run all tests
-node test-audio-tools.js
+Test your Custom JS Functions with sample files:
 
-# Expected output
-═══════════════════════════════════════
-   AUDIO TOOLS TEST SUITE
-═══════════════════════════════════════
-✓ Loaded audio-english-deduplicator.js
-✓ Loaded audio-english-processor.js
+1. **Create test files** with different audio configurations:
+   - Multiple English streams (main + commentary)
+   - Single English stream
+   - No English streams (foreign language)
+   - Undefined language streams
 
-━━━ Testing: multipleEnglish ━━━
-Testing deduplicator...
-Deduplicator result: outputNumber=1, processFile=true
-Testing processor...
-Processor result: outputNumber=1, processFile=true
-Expected: PROCESS
-Actual: PROCESS
-Result: ✅ PASS
+2. **Test in Tdarr Flow**:
+   - Create Custom JS Function blocks
+   - Paste the code from the repository files
+   - Process test files and verify results
 
-[... additional test results ...]
+### Expected Behavior
 
-Overall: 6/6 tests passed
-🎯 Test Suite PASSED
-```
-
-### Test Scenarios Coverage
-
-- ✅ Multiple English streams
-- ✅ Single English stream  
-- ✅ No English streams
-- ✅ Undefined language streams
-- ✅ No audio streams
-- ✅ Complex multi-language scenarios
+- ✅ **Multiple English streams**: Should process and remove duplicates
+- ✅ **Single English stream**: Should skip processing
+- ✅ **No English streams**: Should skip processing
+- ✅ **Undefined language streams**: Should skip for safety
+- ✅ **No audio streams**: Should skip processing
 
 ## 🚨 Troubleshooting
 
@@ -460,13 +412,12 @@ Solutions:
 
 ### Debug Mode
 
-Enable verbose logging for troubleshooting:
-```bash
-# Generate plugins with verbose output
-node audio-channel-manager.js --verbose
-
-# Test with detailed output
-node test-audio-tools.js
+Enable verbose logging by adding debug statements to your Custom JS Functions:
+```javascript
+// Add at the beginning of your Custom JS Function
+args.jobLog(`DEBUG: Input file: ${args.inputFileObj._id}`);
+args.jobLog(`DEBUG: Container: ${args.inputFileObj.container}`);
+args.jobLog(`DEBUG: Stream count: ${args.inputFileObj.ffProbeData.streams.length}`);
 ```
 
 ### Log Analysis
@@ -540,14 +491,14 @@ if (isAVI) {
 
 1. Clone the repository
 2. Install Node.js (if not already installed)
-3. Run tests: `node test-audio-tools.js`
+3. Test Custom JS Functions manually in Tdarr Flow
 4. Make changes and test thoroughly
 5. Follow existing code patterns
 
 ### Submitting Changes
 
-1. Test all scenarios with `test-audio-tools.js`
-2. Verify Tdarr plugin generation works
+1. Test all scenarios manually with sample files
+2. Verify Custom JS Functions work in Tdarr Flow
 3. Update documentation if needed
 4. Follow repository commit conventions
 
