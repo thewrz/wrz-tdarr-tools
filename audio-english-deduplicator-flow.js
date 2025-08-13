@@ -151,10 +151,18 @@ module.exports = async (args) => {
       args.jobLog(`🔄 Commentary/Audio Description tracks detected (${analysis.commentaryStreams.length}) - removal needed`);
     }
     
-    // Determine streams to keep/remove
+    // Determine streams to keep/remove with English stream first
     const streamsToKeep = [];
-    streamsToKeep.push(analysis.englishStreams[0]); // Keep first English stream
+    
+    // Always put the English stream first
+    streamsToKeep.push(analysis.englishStreams[0]); // Keep first English stream as primary
+    
+    // Add other language streams after English
     streamsToKeep.push(...analysis.otherLanguageStreams); // Keep all other languages
+    
+    // Add undefined streams last (if any - though we skip processing when these exist)
+    streamsToKeep.push(...analysis.undefinedStreams);
+    
     // Note: Commentary streams are automatically excluded from streamsToKeep
     
     const streamsToRemove = [
@@ -162,8 +170,11 @@ module.exports = async (args) => {
       ...analysis.commentaryStreams // Remove all commentary streams
     ];
 
-    args.jobLog(`✓ Keeping first English stream (index ${analysis.englishStreams[0].index})`);
+    args.jobLog(`✓ Keeping first English stream (index ${analysis.englishStreams[0].index}) - will be positioned as first audio track`);
     args.jobLog(`✓ Keeping ${analysis.otherLanguageStreams.length} other language streams`);
+    if (analysis.undefinedStreams.length > 0) {
+      args.jobLog(`✓ Keeping ${analysis.undefinedStreams.length} undefined language streams`);
+    }
     args.jobLog(`❌ Removing ${analysis.englishStreams.length - 1} duplicate English streams`);
     args.jobLog(`❌ Removing ${analysis.commentaryStreams.length} commentary/audio description streams`);
 
