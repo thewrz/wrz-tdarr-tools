@@ -59,6 +59,66 @@ module.exports = async (args) => {
       return commentaryPatterns.some(pattern => pattern.test(textToCheck));
     }
 
+    // Language detection patterns for title inspection
+    const languagePatterns = {
+      eng: [
+        /\benglish\b/i,
+        /\beng\b/i,
+        /\ben\b/i,
+        /\ben-us\b/i,
+        /\ben-gb\b/i,
+        /\ben-au\b/i,
+        /\ben-ca\b/i
+      ],
+      jpn: [
+        /\bjapanese\b/i,
+        /\bjpn\b/i,
+        /\bja\b/i,
+        /\bja-jp\b/i,
+        /\bnihongo\b/i,
+        /\b日本語\b/i
+      ],
+      kor: [
+        /\bkorean\b/i,
+        /\bkor\b/i,
+        /\bko\b/i,
+        /\bko-kr\b/i,
+        /\bhangul\b/i,
+        /\b한국어\b/i
+      ],
+      deu: [
+        /\bgerman\b/i,
+        /\bdeu\b/i,
+        /\bger\b/i,
+        /\bde\b/i,
+        /\bde-de\b/i,
+        /\bdeutsch\b/i
+      ],
+      fra: [
+        /\bfrench\b/i,
+        /\bfra\b/i,
+        /\bfre\b/i,
+        /\bfr\b/i,
+        /\bfr-fr\b/i,
+        /\bfrancais\b/i,
+        /\bfrançais\b/i
+      ]
+    };
+
+    function detectLanguageFromTitle(title) {
+      if (!title) return null;
+      
+      const titleLower = title.toLowerCase().trim();
+      
+      for (const [isoCode, patterns] of Object.entries(languagePatterns)) {
+        if (patterns.some(pattern => pattern.test(titleLower))) {
+          return isoCode;
+        }
+      }
+      
+      return null;
+    }
+
     // Analyze audio streams by language and filter out commentary
     const analysis = {
       englishStreams: [],
@@ -71,12 +131,28 @@ module.exports = async (args) => {
 
     audioStreams.forEach((stream, index) => {
       const tags = stream.tags || {};
-      const language = (tags.language || 'und').toLowerCase();
+      let language = (tags.language || '').toLowerCase();
       const channels = stream.channels || 0;
       const codec = stream.codec_name || 'unknown';
       const trackName = tags.title || tags.name || tags.handler_name || '';
+      let languageSource = 'tag';
       
-      args.jobLog(`Stream ${index}: ${codec} (${channels}ch) - ${language}`);
+      // If no language tag or language is 'und', try to detect from title
+      if (!language || language === 'und' || language === 'undefined') {
+        const detectedLanguage = detectLanguageFromTitle(trackName);
+        if (detectedLanguage) {
+          language = detectedLanguage;
+          languageSource = 'title';
+          args.jobLog(`Stream ${index}: ${codec} (${channels}ch) - ${language} (detected from title)`);
+        } else {
+          language = 'und';
+          languageSource = 'undefined';
+          args.jobLog(`Stream ${index}: ${codec} (${channels}ch) - und (no language detected)`);
+        }
+      } else {
+        args.jobLog(`Stream ${index}: ${codec} (${channels}ch) - ${language}`);
+      }
+      
       if (trackName) {
         args.jobLog(`  Title: "${trackName}"`);
       }
@@ -85,6 +161,7 @@ module.exports = async (args) => {
         index: stream.index,
         streamIndex: index,
         language: language,
+        languageSource: languageSource,
         channels: channels,
         codec: codec,
         trackName: trackName,
@@ -97,15 +174,32 @@ module.exports = async (args) => {
         args.jobLog(`  → Commentary/Audio Description detected - will be removed`);
       } else if (language === 'eng' || language === 'en' || language === 'english') {
         analysis.englishStreams.push(streamInfo);
-        args.jobLog(`  → English stream detected`);
+        args.jobLog(`  → English stream detected (${languageSource})`);
       } else if (language === 'und' || language === 'undefined') {
         analysis.undefinedStreams.push(streamInfo);
         args.jobLog(`  → Undefined language stream`);
       } else {
         analysis.otherLanguageStreams.push(streamInfo);
-        args.jobLog(`  → Other language stream (${language})`);
+        args.jobLog(`  → Other language stream (${language}) (${languageSource})`);
       }
     });
+
+    // Handle undefined streams - keep only the first one, mark others for removal
+    if (analysis.undefinedStreams.length > 1) {
+      args.jobLog(`⚠️ Found ${analysis.undefinedStreams.length} undefined language streams - keeping only the first one`);
+      const firstUndefined = analysis.undefinedStreams[0];
+      const extraUndefined = analysis.undefinedStreams.slice(1);
+      
+      // Keep only the first undefined stream
+      analysis.undefinedStreams = [firstUndefined];
+      
+      // Add extra undefined streams to commentary streams for removal
+      analysis.commentaryStreams.push(...extraUndefined);
+      
+      extraUndefined.forEach(stream => {
+        args.jobLog(`  → Extra undefined stream ${stream.streamIndex} marked for removal`);
+      });
+    }
 
     // Log commentary detection results
     if (analysis.commentaryStreams.length > 0) {
@@ -117,18 +211,9 @@ module.exports = async (args) => {
 
     args.jobLog('━━━ Processing Decision ━━━');
     
-    // Skip if undefined language streams exist (avoid data loss)
-    if (analysis.undefinedStreams.length > 0) {
-      args.jobLog('⚠️ Found undefined language streams - skipping to avoid data loss');
-      return {
-        outputFileObj: args.inputFileObj,
-        outputNumber: 2, // Skip processing
-        variables: args.variables,
-      };
-    }
-
-    // Check if we need processing (duplicates or commentary)
-    const needsProcessing = analysis.englishStreams.length > 1 || analysis.commentaryStreams.length > 0;
+    // Check if we need processing (duplicates, commentary, or multiple undefined streams)
+    const needsProcessing = analysis.englishStreams.length > 1 || 
+                           analysis.commentaryStreams.length > 0;
 
     if (!needsProcessing) {
       if (analysis.englishStreams.length === 0) {
