@@ -1,5 +1,6 @@
 // Stage 4: Convert extracted subtitles to SRT format
 // This block uses FFmpeg to convert various subtitle formats to SRT
+// Now handles both conversion and preservation of existing SRT files
 
 module.exports = async (args) => {
   const path = require('path');
@@ -37,7 +38,7 @@ module.exports = async (args) => {
   console.log(`Processing files for session: ${uniqueId}`);
   
   if (extractedFiles.length === 0) {
-    console.log('No files to convert');
+    console.log('No files to process');
     return {
       outputFileObj: args.inputFileObj,
       outputNumber: 1,
@@ -45,8 +46,8 @@ module.exports = async (args) => {
     };
   }
   
-  // Store converted files info
-  args.variables.convertedFiles = [];
+  // Store final SRT files info for muxing stage
+  args.variables.finalSrtFiles = [];
   
   // Find FFmpeg executable
   function resolveBin(candidates) {
@@ -64,91 +65,155 @@ module.exports = async (args) => {
     ]) || 'ffmpeg'; // last resort: PATH
 
   console.log(`Using FFmpeg: ${ffmpegExe}`);
-  console.log(`Converting ${extractedFiles.length} subtitle files:\n`);
   
-  for (const file of extractedFiles) {
-    const outputFile = path.join(workDir, `subtitle_${uniqueId}_${file.trackId}.srt`);
+  // Separate files by type
+  const toConvert = extractedFiles.filter(f => f.trackType === 'convert');
+  const toKeep = extractedFiles.filter(f => f.trackType === 'keep');
+  const toDiscard = extractedFiles.filter(f => f.trackType === 'discard');
+  
+  console.log(`Files to convert: ${toConvert.length}`);
+  console.log(`Files to keep (already SRT): ${toKeep.length}`);
+  console.log(`Files to discard (bitmap): ${toDiscard.length}\n`);
+  
+  // Process files that need conversion
+  if (toConvert.length > 0) {
+    console.log('━━━ Converting subtitle files ━━━');
     
-    console.log(`Track ${file.trackId} (${file.format}):`);
-    console.log(`  Input: ${path.basename(file.inputFile)}`);
-    console.log(`  Output: ${path.basename(outputFile)}`);
-    
-    try {
-      let ffmpegCmd = '';
+    for (const file of toConvert) {
+      const outputFile = path.join(workDir, `subtitle_${uniqueId}_${file.trackId}.srt`);
       
-      // Build FFmpeg command based on format
-      switch(file.format) {
-        case 'ass':
-        case 'ssa':
-          // ASS/SSA to SRT
-          ffmpegCmd = `"${ffmpegExe}" -i "${file.inputFile}" -c:s srt "${outputFile}" -y`;
-          console.log(`  Method: ASS/SSA to SRT`);
-          break;
+      console.log(`Track ${file.trackId} (${file.format}):`);
+      console.log(`  Input: ${path.basename(file.inputFile)}`);
+      console.log(`  Output: ${path.basename(outputFile)}`);
+      
+      try {
+        let ffmpegCmd = '';
+        
+        // Build FFmpeg command based on format
+        switch(file.format) {
+          case 'ass':
+          case 'ssa':
+            // ASS/SSA to SRT
+            ffmpegCmd = `"${ffmpegExe}" -i "${file.inputFile}" -c:s srt "${outputFile}" -y`;
+            console.log(`  Method: ASS/SSA to SRT`);
+            break;
+            
+          case 'webvtt':
+            // WebVTT to SRT
+            ffmpegCmd = `"${ffmpegExe}" -i "${file.inputFile}" -c:s srt "${outputFile}" -y`;
+            console.log(`  Method: WebVTT to SRT`);
+            break;
+            
+          case 'mov_text':
+            // MOV_TEXT to SRT
+            ffmpegCmd = `"${ffmpegExe}" -i "${file.inputFile}" -c:s srt "${outputFile}" -y`;
+            console.log(`  Method: MOV_TEXT to SRT`);
+            break;
+            
+          default:
+            // Generic conversion
+            ffmpegCmd = `"${ffmpegExe}" -i "${file.inputFile}" -c:s srt "${outputFile}" -y`;
+            console.log(`  Method: Generic to SRT`);
+        }
+        
+        console.log(`  Running: ${ffmpegCmd}`);
+        
+        // Execute conversion with timeout and better error handling
+        const result = execSync(ffmpegCmd, {
+          encoding: 'utf8',
+          maxBuffer: 1024 * 1024 * 10,
+          timeout: 120000 // 2 minute timeout
+        });
+        
+        // Verify output file exists
+        if (fs.existsSync(outputFile)) {
+          const stats = fs.statSync(outputFile);
+          console.log(`  ✓ Converted successfully: ${stats.size} bytes`);
           
-        case 'webvtt':
-          // WebVTT to SRT
-          ffmpegCmd = `"${ffmpegExe}" -i "${file.inputFile}" -c:s srt "${outputFile}" -y`;
-          console.log(`  Method: WebVTT to SRT`);
-          break;
-          
-        case 'mov_text':
-          // MOV_TEXT to SRT
-          ffmpegCmd = `"${ffmpegExe}" -i "${file.inputFile}" -c:s srt "${outputFile}" -y`;
-          console.log(`  Method: MOV_TEXT to SRT`);
-          break;
-          
-        default:
-          // Generic conversion
-          ffmpegCmd = `"${ffmpegExe}" -i "${file.inputFile}" -c:s srt "${outputFile}" -y`;
-          console.log(`  Method: Generic to SRT`);
+          // Store info for muxing stage
+          args.variables.finalSrtFiles.push({
+            trackId: file.trackId,
+            srtFile: outputFile,
+            language: file.language,
+            originalCodec: file.codec
+          });
+        } else {
+          console.log(`  ❌ Conversion failed - output file not created`);
+        }
+        
+      } catch (error) {
+        console.error(`  ❌ Error converting track ${file.trackId}:`, error.message);
+        // Continue with other files even if one fails
       }
       
-      console.log(`  Running: ${ffmpegCmd}`);
+      console.log('');
+    }
+  }
+  
+  // Process files that are already SRT (just rename/copy them)
+  if (toKeep.length > 0) {
+    console.log('━━━ Processing existing SRT files ━━━');
+    
+    for (const file of toKeep) {
+      const outputFile = path.join(workDir, `subtitle_${uniqueId}_${file.trackId}.srt`);
       
-      // Execute conversion with timeout and better error handling
-      const result = execSync(ffmpegCmd, {
-        encoding: 'utf8',
-        maxBuffer: 1024 * 1024 * 10,
-        timeout: 120000 // 2 minute timeout
-      });
+      console.log(`Track ${file.trackId} (already SRT):`);
+      console.log(`  Input: ${path.basename(file.inputFile)}`);
+      console.log(`  Output: ${path.basename(outputFile)}`);
       
-      // Verify output file exists
-      if (fs.existsSync(outputFile)) {
+      try {
+        // Copy the existing SRT file to the standardized name
+        fs.copyFileSync(file.inputFile, outputFile);
+        
         const stats = fs.statSync(outputFile);
-        console.log(`  ✓ Converted successfully: ${stats.size} bytes`);
+        console.log(`  ✓ Copied successfully: ${stats.size} bytes`);
         
         // Store info for muxing stage
-        args.variables.convertedFiles.push({
+        args.variables.finalSrtFiles.push({
           trackId: file.trackId,
           srtFile: outputFile,
           language: file.language,
           originalCodec: file.codec
         });
-      } else {
-        console.log(`  ❌ Conversion failed - output file not created`);
+        
+      } catch (error) {
+        console.error(`  ❌ Error copying track ${file.trackId}:`, error.message);
       }
       
-    } catch (error) {
-      console.error(`  ❌ Error converting track ${file.trackId}:`, error.message);
-      // Continue with other files even if one fails
+      console.log('');
     }
-    
+  }
+  
+  // Note about discarded files
+  if (toDiscard.length > 0) {
+    console.log('━━━ Bitmap subtitles (discarded) ━━━');
+    for (const file of toDiscard) {
+      console.log(`Track ${file.trackId}: ${file.codec} (bitmap - will be removed)`);
+    }
     console.log('');
   }
   
   console.log(`━━━ Conversion Summary ━━━`);
-  console.log(`✓ Successfully converted: ${args.variables.convertedFiles.length}/${extractedFiles.length} files`);
+  console.log(`✓ Successfully processed: ${args.variables.finalSrtFiles.length} SRT files`);
+  console.log(`  - Converted: ${toConvert.length}`);
+  console.log(`  - Preserved: ${toKeep.length}`);
+  console.log(`  - Discarded: ${toDiscard.length}`);
   
-  // Clean up extracted files that are no longer needed
-  console.log('\nCleaning up extracted files...');
+  // Clean up original extracted files that are no longer needed
+  console.log('\nCleaning up original extracted files...');
   for (const file of extractedFiles) {
-    try {
-      if (fs.existsSync(file.inputFile)) {
-        fs.unlinkSync(file.inputFile);
-        console.log(`  Deleted: ${path.basename(file.inputFile)}`);
+    // Only delete if we successfully created an SRT version
+    const hasSuccessfulSrt = args.variables.finalSrtFiles.some(srt => srt.trackId === file.trackId);
+    
+    if (hasSuccessfulSrt || file.trackType === 'discard') {
+      try {
+        if (fs.existsSync(file.inputFile)) {
+          fs.unlinkSync(file.inputFile);
+          console.log(`  Deleted: ${path.basename(file.inputFile)}`);
+        }
+      } catch (error) {
+        console.log(`  Could not delete: ${path.basename(file.inputFile)}`);
       }
-    } catch (error) {
-      console.log(`  Could not delete: ${path.basename(file.inputFile)}`);
     }
   }
   
