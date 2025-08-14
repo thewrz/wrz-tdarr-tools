@@ -437,14 +437,38 @@ module.exports = async (args) => {
 
         const mkvArgs = [
           '-o', tempOutput,
-          '--verbose',
           '--audio-tracks', audioTracks,
-          // '--video-tracks', 'all',
-          // '--subtitle-tracks', 'all',
-          // '--chapters', 'all',
-          // '--attachments', 'all',
-          inputFile
+          //'--video-tracks', 'all',
+          //'--subtitle-tracks', 'all',
+          //'--chapters', 'all',
+          //'--attachments', 'all'
         ];
+
+        // Add language tags for each audio track being kept
+        streamsToKeep.forEach(streamToKeep => {
+          const mkvTrack = mkvTracks.find(track => 
+            track.type === 'audio' && 
+            track.id === streamToKeep.index
+          );
+          
+          if (mkvTrack) {
+            // Set language for this specific track
+            mkvArgs.push('--language', `${mkvTrack.id}:${streamToKeep.language}`);
+            args.jobLog(`✓ Setting language for track ${mkvTrack.id}: ${streamToKeep.language}`);
+          } else {
+            // Try alternative mapping by stream position
+            const audioStreamsInMkv = mkvTracks.filter(t => t.type === 'audio');
+            const streamPosition = streamToKeep.streamIndex;
+            
+            if (streamPosition < audioStreamsInMkv.length) {
+              const alternativeTrack = audioStreamsInMkv[streamPosition];
+              mkvArgs.push('--language', `${alternativeTrack.id}:${streamToKeep.language}`);
+              args.jobLog(`✓ Setting language for alternative track ${alternativeTrack.id}: ${streamToKeep.language}`);
+            }
+          }
+        });
+
+        mkvArgs.push(inputFile);
 
         args.jobLog(`Command: mkvmerge ${mkvArgs.join(' ')}`);
 
@@ -533,10 +557,17 @@ module.exports = async (args) => {
         const ffmpegArgs = [
           '-i', inputFile,
           ...mapArgs,
-          '-c', 'copy', // Copy all streams without re-encoding
-          '-y', // Overwrite output file
-          tempOutput
+          '-c', 'copy' // Copy all streams without re-encoding
         ];
+
+        // Add language metadata for each mapped audio stream
+        streamsToKeep.forEach((stream, outputIndex) => {
+          // Set language metadata for the output stream at this position
+          ffmpegArgs.push('-metadata:s:a:' + outputIndex, `language=${stream.language}`);
+          args.jobLog(`✓ Setting language for output audio stream ${outputIndex}: ${stream.language}`);
+        });
+
+        ffmpegArgs.push('-y', tempOutput); // Overwrite output file
 
         args.jobLog(`Command: ffmpeg ${ffmpegArgs.join(' ')}`);
 
