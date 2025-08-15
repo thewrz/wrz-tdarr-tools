@@ -12,7 +12,8 @@ module.exports = async (args) => {
   
   // Check if we should skip
   if (args.variables.skipProcessing) {
-    console.log('⚠️ Skipping mux');
+    console.log('⚠️ Skipping mux - no processing needed');
+    console.log('✓ File is already optimized');
     return {
       outputFileObj: args.inputFileObj,
       outputNumber: 1,
@@ -125,13 +126,45 @@ module.exports = async (args) => {
       
       // === SUBTITLE TRACKS ===
       if (needsSubtitleProcessing) {
-        // Remove ALL original subtitles first
-        mkvmergeCmd += ` --no-subtitles`;
-        console.log(`✓ Removing all original subtitles`);
+        // Keep only existing English SRT tracks (if any) and add converted ones
+        let keepSubtitleIds = [];
+        if (analysis && analysis.subtitles && Array.isArray(analysis.subtitles.toKeep) && analysis.subtitles.toKeep.length > 0) {
+          keepSubtitleIds = analysis.subtitles.toKeep.map(t => t.id);
+        }
+        if (keepSubtitleIds.length > 0) {
+          mkvmergeCmd += ` --subtitle-tracks ${keepSubtitleIds.join(',')}`;
+          console.log(`✓ Keeping existing English SRT subtitle track IDs: ${keepSubtitleIds.join(', ')}`);
+        } else {
+          mkvmergeCmd += ` --no-subtitles`;
+          console.log(`✓ No existing English SRT to keep; removing all original subtitles`);
+        }
       } else {
-        mkvmergeCmd += ` --subtitle-tracks all`;
-        console.log(`✓ Including all subtitle tracks`);
+        // Check if we have many subtitle tracks - if so, only keep English ones
+        const allSubtitleTracks = args.variables.subtitleTracks || [];
+        if (allSubtitleTracks.length > 20) {
+          // For files with many subtitle tracks, be selective and only keep English ones
+          const englishSubtitleIds = allSubtitleTracks
+            .filter(track => {
+              const lang = (track.language || '').toLowerCase();
+              const name = (track.name || '').toLowerCase();
+              return lang === 'eng' || lang === 'en' || lang === 'english' ||
+                     /\benglish\b/i.test(name) || /\beng\b/i.test(name) || /\ben\b/i.test(name);
+            })
+            .map(track => track.id);
+          
+          if (englishSubtitleIds.length > 0) {
+            mkvmergeCmd += ` --subtitle-tracks ${englishSubtitleIds.join(',')}`;
+            console.log(`✓ Large subtitle count detected (${allSubtitleTracks.length}) - keeping only ${englishSubtitleIds.length} English subtitle tracks`);
+          } else {
+            mkvmergeCmd += ` --no-subtitles`;
+            console.log(`✓ Large subtitle count detected (${allSubtitleTracks.length}) - no English subtitles found, removing all`);
+          }
+        } else {
+          mkvmergeCmd += ` --subtitle-tracks all`;
+          console.log(`✓ Including all subtitle tracks`);
+        }
       }
+      
       
       // Add input file
       mkvmergeCmd += ` "${inputFile}"`;

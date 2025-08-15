@@ -10,7 +10,7 @@ module.exports = async (args) => {
   console.log('═══════════════════════════════════════');
   
   // Check if we should skip
-  if (args.variables.skipProcessing || !args.variables.needsProcessing) {
+  if (args.variables.skipProcessing) {
     console.log('⚠️ Skipping extraction - no processing needed');
     return {
       outputFileObj: args.inputFileObj,

@@ -11,7 +11,7 @@ module.exports = async (args) => {
   
   // Check if we should skip
   if (args.variables.skipProcessing) {
-    console.log('⚠️ Skipping conversion');
+    console.log('⚠️ Skipping conversion - no processing needed');
     return {
       outputFileObj: args.inputFileObj,
       outputNumber: 1,

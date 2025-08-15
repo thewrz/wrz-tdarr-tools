@@ -212,12 +212,13 @@ module.exports = async (args) => {
   args.variables.audioTracks = audioTracks;
   args.variables.subtitleTracks = subtitleTracks;
 
-  // Check if any processing is needed
-  const hasSubtitles = subtitleTracks.length > 0;
-  const hasMultipleAudio = audioTracks.length > 1;
+  // Initial check - only skip if there's absolutely nothing to potentially process
+  // The detailed analysis will happen in Stage 2
+  const hasAnySubtitles = subtitleTracks.length > 0;
+  const hasAnyAudio = audioTracks.length > 0;
   
-  if (!hasSubtitles && !hasMultipleAudio) {
-    console.log('⚠️ No subtitles or multiple audio tracks — skipping');
+  if (!hasAnySubtitles && !hasAnyAudio) {
+    console.log('⚠️ No audio or subtitle tracks found — skipping');
     args.variables.skipProcessing = true;
     return {
       outputFileObj: args.inputFileObj,
@@ -227,6 +228,7 @@ module.exports = async (args) => {
     };
   }
 
+  // Let Stage 2 do the detailed analysis to determine if processing is actually needed
   args.variables.skipProcessing = false;
   return {
     outputFileObj: args.inputFileObj,

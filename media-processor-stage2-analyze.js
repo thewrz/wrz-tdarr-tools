@@ -309,7 +309,21 @@ module.exports = async (args) => {
   }
   
   // Analyze subtitle streams - only process English subtitles
-  subtitleTracks.forEach(track => {
+  // First, filter to only English subtitles to avoid processing hundreds of non-English tracks
+  const englishSubtitles = subtitleTracks.filter(track => {
+    const lang = track.language || '';
+    const trackName = track.name || '';
+    return isEnglishSubtitle(lang, trackName);
+  });
+  
+  console.log(`Found ${subtitleTracks.length} total subtitle tracks, ${englishSubtitles.length} English tracks`);
+  
+  if (subtitleTracks.length > 20) {
+    console.log(`⚠️ Large number of subtitle tracks detected (${subtitleTracks.length}) - processing only English tracks for efficiency`);
+  }
+  
+  // Process only English subtitle tracks
+  englishSubtitles.forEach(track => {
     const codec = track.codec.toLowerCase();
     const lang = track.language || '';
     const trackName = track.name || '';
@@ -318,12 +332,6 @@ module.exports = async (args) => {
     console.log(`  Language: ${lang || 'undefined'}`);
     if (trackName) {
       console.log(`  Title: "${trackName}"`);
-    }
-    
-    // Only process English subtitles
-    if (!isEnglishSubtitle(lang, trackName)) {
-      console.log(`  → Skipping (not English)`);
-      return;
     }
     
     // Check if it's English (for default flag)
@@ -386,46 +394,53 @@ module.exports = async (args) => {
     }
   });
   
+  // Log non-English tracks that will be ignored
+  const nonEnglishCount = subtitleTracks.length - englishSubtitles.length;
+  if (nonEnglishCount > 0) {
+    console.log(`  → Ignoring ${nonEnglishCount} non-English subtitle tracks`);
+  }
+  
   // Check if subtitle processing is needed
   analysis.subtitles.needsProcessing = analysis.subtitles.toConvert.length > 0 || 
                                        analysis.subtitles.toDiscard.length > 0;
   
-  // === OVERALL PROCESSING DECISION ===
-  console.log('\n━━━ Processing Decision Summary ━━━');
-  
-  const needsVideoProcessing = analysis.video.tracksToKeep.length > 0;
-  const needsAudioProcessing = analysis.audio.needsProcessing;
-  const needsSubtitleProcessing = analysis.subtitles.needsProcessing;
-  const needsAnyProcessing = needsVideoProcessing || needsAudioProcessing || needsSubtitleProcessing;
-  
-  console.log(`Video processing needed: ${needsVideoProcessing ? 'YES' : 'NO'}`);
-  console.log(`Audio processing needed: ${needsAudioProcessing ? 'YES' : 'NO'}`);
-  console.log(`Subtitle processing needed: ${needsSubtitleProcessing ? 'YES' : 'NO'}`);
-  
-  if (needsAudioProcessing) {
-    console.log(`  - English streams to keep: ${analysis.audio.englishStreams.length > 0 ? 1 : 0}`);
-    console.log(`  - English streams to remove: ${Math.max(0, analysis.audio.englishStreams.length - 1)}`);
-    console.log(`  - Commentary streams to remove: ${analysis.audio.commentaryStreams.length}`);
-    console.log(`  - Other language streams to keep: ${analysis.audio.otherLanguageStreams.length}`);
-  }
-  
-  if (needsSubtitleProcessing) {
-    console.log(`  - Subtitles to convert: ${analysis.subtitles.toConvert.length}`);
-    console.log(`  - Subtitles to keep: ${analysis.subtitles.toKeep.length}`);
-    console.log(`  - Subtitles to discard: ${analysis.subtitles.toDiscard.length}`);
-  }
-  
-  if (!needsAnyProcessing) {
-    console.log('✓ No processing needed - file is already optimized');
-    args.variables.skipProcessing = true;
-  } else {
-    console.log('✓ Processing needed - will proceed to extraction and muxing');
-    args.variables.skipProcessing = false;
-  }
-  
-  // Store comprehensive analysis
-  args.variables.mediaAnalysis = analysis;
-  args.variables.needsProcessing = needsAnyProcessing;
+ // === OVERALL PROCESSING DECISION ===
+ console.log('\n━━━ Processing Decision Summary ━━━');
+ 
+ // Video processing is only needed if we have multiple video tracks to filter
+ const needsVideoProcessing = videoTracks.length > 1;
+ const needsAudioProcessing = analysis.audio.needsProcessing;
+ const needsSubtitleProcessing = analysis.subtitles.needsProcessing;
+ const needsAnyProcessing = needsVideoProcessing || needsAudioProcessing || needsSubtitleProcessing;
+ 
+ console.log(`Video processing needed: ${needsVideoProcessing ? 'YES' : 'NO'}`);
+ console.log(`Audio processing needed: ${needsAudioProcessing ? 'YES' : 'NO'}`);
+ console.log(`Subtitle processing needed: ${needsSubtitleProcessing ? 'YES' : 'NO'}`);
+ 
+ if (needsAudioProcessing) {
+   console.log(` - English streams to keep: ${analysis.audio.englishStreams.length > 0 ? 1 : 0}`);
+   console.log(` - English streams to remove: ${Math.max(0, analysis.audio.englishStreams.length - 1)}`);
+   console.log(` - Commentary streams to remove: ${analysis.audio.commentaryStreams.length}`);
+   console.log(` - Other language streams to keep: ${analysis.audio.otherLanguageStreams.length}`);
+ }
+ 
+ if (needsSubtitleProcessing) {
+   console.log(` - Subtitles to convert: ${analysis.subtitles.toConvert.length}`);
+   console.log(` - Subtitles to keep: ${analysis.subtitles.toKeep.length}`);
+   console.log(` - Subtitles to discard: ${analysis.subtitles.toDiscard.length}`);
+ }
+ 
+ if (!needsAnyProcessing) {
+   console.log('✓ No processing needed - file is already optimized');
+   args.variables.skipProcessing = true;
+ } else {
+   console.log('✓ Processing needed - will proceed to extraction and muxing');
+   args.variables.skipProcessing = false;
+ }
+ 
+ // Store comprehensive analysis
+ args.variables.mediaAnalysis = analysis;
+ args.variables.needsProcessing = needsAnyProcessing;
   
   return {
     outputFileObj: args.inputFileObj,
