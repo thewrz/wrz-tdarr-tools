@@ -557,9 +557,15 @@ module.exports = async (args) => {
     args.jobLog(`  🎯 English content prioritized for maximum compatibility`);
 
     // Update the input file object to point to the processed working file
+    // Following Tdarr's pattern: return only the filename, not the full path
+    const finalWorkingFileName = path.basename(workingFile);
+    const workingFileInWorkDir = path.join(args.workDir, finalWorkingFileName);
+    
+    args.jobLog(`Returning working file: ${workingFileInWorkDir}`);
+    
     const updatedFileObj = {
       ...args.inputFileObj,
-      _id: workingFile
+      _id: workingFileInWorkDir
     };
 
     return {
