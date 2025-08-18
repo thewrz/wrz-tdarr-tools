@@ -1,6 +1,6 @@
-// Example: How to check for remuxed files in subsequent flow plugins
-// This shows how to detect when smart-media-preprocessor has processed a file
-// and ensure it gets replaced even when other conditions are met
+// Checks for remuxed files
+// When smart-media-preprocessor has processed a file
+// use outputNumber: 2 to force replacement of file
 
 module.exports = (args) => {
   args.jobLog('=== CHECKING FOR PREPROCESSED FILES ===');
@@ -9,16 +9,14 @@ module.exports = (args) => {
   const wasRemuxed = args.variables.remuxed === true;
   const requiresReplacement = args.variables.requiresReplacement === true;
   const wasPreprocessed = args.variables.preprocessed === true;
-  const forceProcess = args.variables.processFile === true;
 
   args.jobLog(`Variables check:`);
   args.jobLog(`  remuxed: ${wasRemuxed}`);
   args.jobLog(`  requiresReplacement: ${requiresReplacement}`);
   args.jobLog(`  preprocessed: ${wasPreprocessed}`);
-  args.jobLog(`  processFile: ${forceProcess}`);
 
   // If any of these flags are set, force processing
-  if (wasRemuxed || requiresReplacement || wasPreprocessed || forceProcess) {
+  if (wasRemuxed || requiresReplacement || wasPreprocessed) {
     args.jobLog('🚨 File was preprocessed - FORCING REPLACEMENT regardless of other conditions');
     
     if (args.variables.streamsRemoved > 0) {
