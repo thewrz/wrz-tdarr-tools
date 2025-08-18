@@ -285,14 +285,26 @@ module.exports = async (args) => {
     args.jobLog(`  Commentary: ${audioCategories.commentary.length}`);
     args.jobLog(`  Other: ${audioCategories.other.length}`);
 
-    // Determine which audio streams to keep (English first, then Japanese, Korean, French, Unknown)
-    const keptAudioStreams = [
-      ...audioCategories.english,
+    // Determine which audio streams to keep - prioritize single primary English track
+    const keptAudioStreams = [];
+    
+    // Keep only the first English audio track (primary)
+    if (audioCategories.english.length > 0) {
+      keptAudioStreams.push(audioCategories.english[0]);
+      args.jobLog(`Selected primary English audio track: stream ${audioCategories.english[0].index}`);
+      
+      if (audioCategories.english.length > 1) {
+        args.jobLog(`⚠️ Skipping ${audioCategories.english.length - 1} additional English audio track(s)`);
+      }
+    }
+    
+    // Then add other language tracks (Japanese, Korean, French, Unknown)
+    keptAudioStreams.push(
       ...audioCategories.japanese,
       ...audioCategories.korean,
       ...audioCategories.french,
       ...audioCategories.unknown
-    ];
+    );
 
     // If no streams detected, keep all non-commentary streams as fallback
     if (keptAudioStreams.length === 0) {
