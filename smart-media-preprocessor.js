@@ -59,23 +59,47 @@ module.exports = async (args) => {
     let workingDir, workingFile, sourceFile;
     
     if (hasWorkingDir) {
-      workingDir = args.workDir;
-      // Extract just the filename, handling complex paths that may contain working directory structures
+      workingDir = path.normalize(args.workDir);
+      
+      // Extract just the filename - be extremely aggressive about this
       let baseFileName = path.basename(inputFile);
       
-      // If the basename still contains path separators, extract just the actual filename
+      // Additional safety: if the basename still contains separators, extract manually
       if (baseFileName.includes('\\') || baseFileName.includes('/')) {
-        // Split by both types of separators and take the last part
         const parts = baseFileName.split(/[\\\/]/);
         baseFileName = parts[parts.length - 1];
       }
       
-      // Remove any remaining path artifacts
+      // Final safety: remove any remaining path artifacts using regex
       baseFileName = baseFileName.replace(/^.*[\\\/]/, '');
       
+      // Ensure we have a valid filename
+      if (!baseFileName || baseFileName.trim() === '') {
+        throw new Error('Could not extract valid filename from input file path');
+      }
+      
+      // Create the working file path using ONLY the filename
       workingFile = path.join(workingDir, baseFileName);
       
+      // Normalize to prevent any path issues
+      workingFile = path.normalize(workingFile);
+      
+      // Additional validation: ensure the working file path doesn't contain the input file's directory
+      const inputFileDir = path.dirname(inputFile);
+      if (workingFile.includes(inputFileDir) && inputFileDir !== workingDir) {
+        args.jobLog(`⚠️ WARNING: Detected potential path nesting issue`);
+        args.jobLog(`   Input file dir: ${inputFileDir}`);
+        args.jobLog(`   Working dir: ${workingDir}`);
+        args.jobLog(`   Reconstructing working file path...`);
+        
+        // Force reconstruction with just the filename
+        workingFile = path.join(workingDir, baseFileName);
+        workingFile = path.normalize(workingFile);
+      }
+      
       args.jobLog(`Extracted base filename: ${baseFileName}`);
+      args.jobLog(`Normalized working directory: ${workingDir}`);
+      args.jobLog(`Constructed working file path: ${workingFile}`);
       
       // Check if working directory exists
       if (!fs.existsSync(workingDir)) {
@@ -324,9 +348,10 @@ module.exports = async (args) => {
     args.jobLog(`Need conversion: ${subtitleConversions.length} streams`);
 
     // === STEP 4: CHECK IF PROCESSING IS NEEDED ===
-    const totalKeptStreams = videoStreams.length + keptAudioStreams.length + keptSubtitleStreams.length;
+    const keptVideoStreams = videoStreams.length > 0 ? 1 : 0; // Only keep first video stream
+    const totalKeptStreams = keptVideoStreams + keptAudioStreams.length + keptSubtitleStreams.length;
     const totalOriginalStreams = streams.length;
-    const needsProcessing = totalKeptStreams < totalOriginalStreams || subtitleConversions.length > 0;
+    const needsProcessing = totalKeptStreams < totalOriginalStreams || subtitleConversions.length > 0 || videoStreams.length > 1;
 
     if (!needsProcessing) {
       args.jobLog('\n✅ No preprocessing needed - file is already optimized');
@@ -350,13 +375,18 @@ module.exports = async (args) => {
 
     let outputStreamIndex = 0;
 
-    // Map video streams (keep all)
-    videoStreams.forEach((stream, index) => {
-      ffmpegArgs.push('-map', `0:v:${index}`);
+    // Map video streams (keep only the first one)
+    if (videoStreams.length > 0) {
+      ffmpegArgs.push('-map', '0:v:0');
       ffmpegArgs.push(`-c:v:${outputStreamIndex}`, 'copy');
-      args.jobLog(`  Video ${outputStreamIndex}: stream 0:v:${index} (copy)`);
+      args.jobLog(`  Video ${outputStreamIndex}: stream 0:v:0 (copy)`);
+      
+      if (videoStreams.length > 1) {
+        args.jobLog(`  ⚠️ Skipping ${videoStreams.length - 1} additional video stream(s)`);
+      }
+      
       outputStreamIndex++;
-    });
+    }
 
     // Map audio streams (filtered)
     let audioOutputIndex = 0;
@@ -414,8 +444,41 @@ module.exports = async (args) => {
     // Add output file and overwrite flag
     ffmpegArgs.push('-y', workingFile);
 
-    args.jobLog(`Output file: ${workingFile}`);
-    args.jobLog(`Command: ${ffmpegPath} ${ffmpegArgs.join(' ')}`);
+    // Additional path validation and debugging
+    args.jobLog(`\n━━━ Path Validation ━━━`);
+    args.jobLog(`Input file path: ${inputFile}`);
+    args.jobLog(`Source file path: ${sourceFile}`);
+    args.jobLog(`Working directory: ${workingDir}`);
+    args.jobLog(`Working file path: ${workingFile}`);
+    args.jobLog(`Working file normalized: ${path.normalize(workingFile)}`);
+    args.jobLog(`Working file resolved: ${path.resolve(workingFile)}`);
+    
+    // Validate that the working file path doesn't contain nested paths
+    const workingFileDir = path.dirname(workingFile);
+    const workingFileName = path.basename(workingFile);
+    args.jobLog(`Working file directory: ${workingFileDir}`);
+    args.jobLog(`Working file name: ${workingFileName}`);
+    
+    // Check if the working file path looks suspicious (contains the working dir twice)
+    if (workingFile.includes(workingDir) && workingFile.indexOf(workingDir) !== workingFile.lastIndexOf(workingDir)) {
+      args.jobLog(`⚠️ WARNING: Working file path may contain nested directories!`);
+      args.jobLog(`   This could cause FFmpeg to fail with "No such file or directory"`);
+    }
+    
+    // Ensure the working directory exists before FFmpeg execution
+    if (!fs.existsSync(workingFileDir)) {
+      args.jobLog(`⚠️ Working file directory doesn't exist, creating: ${workingFileDir}`);
+      try {
+        fs.mkdirSync(workingFileDir, { recursive: true });
+        args.jobLog(`✅ Created working file directory`);
+      } catch (error) {
+        args.jobLog(`❌ Failed to create working file directory: ${error.message}`);
+        throw new Error(`Cannot create working file directory: ${error.message}`);
+      }
+    }
+
+    args.jobLog(`\nFinal FFmpeg command:`);
+    args.jobLog(`${ffmpegPath} ${ffmpegArgs.join(' ')}`);
 
     // === STEP 6: EXECUTE FFMPEG ===
     args.jobLog('\n━━━ Executing FFmpeg ━━━');
