@@ -482,21 +482,61 @@ module.exports = async (args) => {
     // === STEP 6: EXECUTE FFMPEG ===
     args.jobLog('\n━━━ Executing FFmpeg ━━━');
 
+    // Update worker status to show we're starting FFmpeg processing
+    if (args.updateWorker) {
+      args.updateWorker({
+        CLIType: ffmpegPath,
+        preset: ffmpegArgs.join(' '),
+      });
+    }
+
     await new Promise((resolve, reject) => {
       const ffmpegProcess = spawn(ffmpegPath, ffmpegArgs);
       
       let stderrData = '';
       let lastProgress = '';
+      let lastPercentage = 0;
       
       ffmpegProcess.stderr.on('data', (data) => {
         const text = data.toString();
         stderrData += text;
         
-        // Extract progress information
+        // Extract progress information for time-based progress
         const progressMatch = text.match(/time=(\d{2}:\d{2}:\d{2}\.\d{2})/);
         if (progressMatch && progressMatch[1] !== lastProgress) {
           lastProgress = progressMatch[1];
           args.jobLog(`Progress: ${lastProgress}`);
+          
+          // Report progress to Tdarr server if updateWorker is available
+          if (args.updateWorker) {
+            // Convert time to percentage if we have duration info
+            try {
+              const currentTimeSeconds = timeToSeconds(progressMatch[1]);
+              const inputDuration = args.inputFileObj?.ffProbeData?.format?.duration;
+              
+              if (inputDuration && currentTimeSeconds > 0) {
+                const percentage = Math.min(Math.round((currentTimeSeconds / inputDuration) * 100), 100);
+                
+                // Only update if percentage changed significantly (avoid spam)
+                if (percentage !== lastPercentage && percentage % 5 === 0) {
+                  lastPercentage = percentage;
+                  args.updateWorker({
+                    CLIType: ffmpegPath,
+                    preset: ffmpegArgs.join(' '),
+                    percentage: percentage,
+                  });
+                  args.jobLog(`Re-muxing progress: ${percentage}%`);
+                }
+              }
+            } catch (error) {
+              // Fallback to basic progress reporting without percentage
+              args.updateWorker({
+                CLIType: ffmpegPath,
+                preset: ffmpegArgs.join(' '),
+                progress: lastProgress,
+              });
+            }
+          }
         }
         
         // Log errors and warnings
@@ -509,18 +549,59 @@ module.exports = async (args) => {
         if (code !== 0) {
           args.jobLog(`❌ FFmpeg failed with exit code ${code}`);
           args.jobLog(`Error output: ${stderrData}`);
+          
+          // Report failure to server
+          if (args.updateWorker) {
+            args.updateWorker({
+              CLIType: ffmpegPath,
+              preset: ffmpegArgs.join(' '),
+              percentage: 0,
+              error: `FFmpeg failed with exit code ${code}`,
+            });
+          }
+          
           reject(new Error(`FFmpeg failed: ${stderrData}`));
         } else {
           args.jobLog('✅ FFmpeg completed successfully');
+          
+          // Report completion to server
+          if (args.updateWorker) {
+            args.updateWorker({
+              CLIType: ffmpegPath,
+              preset: ffmpegArgs.join(' '),
+              percentage: 100,
+            });
+          }
+          
           resolve();
         }
       });
       
       ffmpegProcess.on('error', (err) => {
         args.jobLog(`❌ Failed to start FFmpeg: ${err.message}`);
+        
+        // Report error to server
+        if (args.updateWorker) {
+          args.updateWorker({
+            CLIType: ffmpegPath,
+            preset: ffmpegArgs.join(' '),
+            percentage: 0,
+            error: `Failed to start FFmpeg: ${err.message}`,
+          });
+        }
+        
         reject(err);
       });
     });
+
+    // Helper function to convert time string to seconds
+    function timeToSeconds(timeString) {
+      const parts = timeString.split(':');
+      const hours = parseInt(parts[0], 10);
+      const minutes = parseInt(parts[1], 10);
+      const seconds = parseFloat(parts[2]);
+      return hours * 3600 + minutes * 60 + seconds;
+    }
 
     // === STEP 7: VERIFY OUTPUT ===
     args.jobLog('\n━━━ Verifying Output ━━━');
