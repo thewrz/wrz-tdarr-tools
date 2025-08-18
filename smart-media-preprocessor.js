@@ -559,13 +559,16 @@ module.exports = async (args) => {
     // Update the input file object to point to the processed working file
     // CRITICAL: Must return the full path to the working file, not just filename
     // Subsequent plugins expect _id to be a valid file path they can access
+    // IMPORTANT: Normalize path separators to forward slashes for Tdarr compatibility
     
-    args.jobLog(`Returning working file path: ${workingFile}`);
+    const normalizedWorkingFile = workingFile.replace(/\\/g, '/');
+    
+    args.jobLog(`Returning working file path: ${normalizedWorkingFile}`);
     args.jobLog(`Working file created at: ${workingFile}`);
     
     const updatedFileObj = {
       ...args.inputFileObj,
-      _id: workingFile
+      _id: normalizedWorkingFile
     };
 
     return {
