@@ -637,6 +637,11 @@ module.exports = async (args) => {
     args.jobLog(`  📋 Kept ${keptAudioStreams.length} audio + ${keptSubtitleStreams.length} subtitle streams`);
     args.jobLog(`  🎯 English content prioritized for maximum compatibility`);
 
+    // Signal that file was processed and needs replacement
+    args.infoLog('File was remuxed and requires library replacement');
+    args.jobLog('🚨 IMPORTANT: File has been remuxed and MUST replace the original library file');
+    args.jobLog('   Subsequent flow plugins should process this file regardless of other conditions');
+
     // Update the input file object to point to the processed working file
     // CRITICAL: Must return the full path to the working file, not just filename
     // Subsequent plugins expect _id to be a valid file path they can access
@@ -655,7 +660,14 @@ module.exports = async (args) => {
     return {
       outputFileObj: updatedFileObj,
       outputNumber: 2,
-      variables: args.variables,
+      variables: {
+        ...args.variables,
+        requiresReplacement: true,   // Custom flag for replacement
+        remuxed: true,              // Indicate remuxing occurred
+        preprocessed: true,         // General processing flag
+        streamsRemoved: audioCategories.commentary.length + audioCategories.other.length + (subtitleStreams.length - keptSubtitleStreams.length),
+        subtitlesConverted: subtitleConversions.length
+      }
     };
 
   } catch (error) {
