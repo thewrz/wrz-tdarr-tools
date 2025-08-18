@@ -41,7 +41,75 @@ module.exports = async (args) => {
   args.jobLog(`Using ffprobe: ${ffprobePath}`);
 
   try {
-    // === STEP 1: ANALYZE INPUT FILE ===
+    // === STEP 1: DETERMINE FILE LOCATIONS AND WORKING DIRECTORY ===
+    args.jobLog('\n━━━ Determining File Locations ━━━');
+    
+    // Get the original library file path
+    const originalLibraryFile = args.originalLibraryFile?._id || inputFile;
+    args.jobLog(`Original library file: ${originalLibraryFile}`);
+    
+    // Check if working directory exists and is provided
+    const hasWorkingDir = args.workDir && args.workDir.trim() !== '';
+    args.jobLog(`Working directory provided: ${hasWorkingDir ? 'Yes' : 'No'}`);
+    if (hasWorkingDir) {
+      args.jobLog(`Working directory: ${args.workDir}`);
+    }
+    
+    // Determine working file path
+    let workingDir, workingFile, sourceFile;
+    
+    if (hasWorkingDir) {
+      workingDir = args.workDir;
+      // Always use just the base filename for the working file, never full paths
+      const baseFileName = path.basename(inputFile); // Use inputFile which is the current file being processed
+      workingFile = path.join(workingDir, baseFileName);
+      
+      // Check if working directory exists
+      if (!fs.existsSync(workingDir)) {
+        args.jobLog(`⚠️ Working directory doesn't exist, creating: ${workingDir}`);
+        try {
+          fs.mkdirSync(workingDir, { recursive: true });
+          args.jobLog(`✅ Created working directory`);
+        } catch (error) {
+          args.jobLog(`❌ Failed to create working directory: ${error.message}`);
+          throw new Error(`Cannot create working directory: ${error.message}`);
+        }
+      }
+      
+      // Check if working file already exists
+      const workingFileExists = fs.existsSync(workingFile);
+      args.jobLog(`Working file exists: ${workingFileExists ? 'Yes' : 'No'}`);
+      
+      if (workingFileExists) {
+        // Use existing working file
+        sourceFile = workingFile;
+        args.jobLog(`📁 Using existing working file: ${sourceFile}`);
+      } else {
+        // Use current input file (which may be library or already in working dir)
+        sourceFile = inputFile;
+        args.jobLog(`📚 Using input file, will output to working directory`);
+        args.jobLog(`   Source: ${sourceFile}`);
+        args.jobLog(`   Output: ${workingFile}`);
+      }
+    } else {
+      // No working directory, work in-place with input file
+      workingDir = path.dirname(inputFile);
+      workingFile = inputFile;
+      sourceFile = inputFile;
+      args.jobLog(`📚 No working directory, processing input file in-place`);
+    }
+    
+    // Verify source file exists
+    if (!fs.existsSync(sourceFile)) {
+      throw new Error(`Source file does not exist: ${sourceFile}`);
+    }
+    
+    args.jobLog(`Final configuration:`);
+    args.jobLog(`  Source file: ${sourceFile}`);
+    args.jobLog(`  Output file: ${workingFile}`);
+    args.jobLog(`  Working directory: ${workingDir}`);
+
+    // === STEP 2: ANALYZE INPUT FILE ===
     args.jobLog('\n━━━ Analyzing Input File ━━━');
     
     let mediaInfo;
@@ -51,12 +119,12 @@ module.exports = async (args) => {
         '-print_format', 'json',
         '-show_streams',
         '-show_format',
-        inputFile
+        sourceFile
       ], { encoding: 'utf8', maxBuffer: 1024 * 1024 * 10 });
       
       mediaInfo = JSON.parse(probeResult);
     } catch (error) {
-      args.jobLog(`❌ Failed to analyze input file: ${error.message}`);
+      args.jobLog(`❌ Failed to analyze source file: ${error.message}`);
       return {
         outputFileObj: args.inputFileObj,
         outputNumber: 1,
@@ -261,13 +329,8 @@ module.exports = async (args) => {
     // === STEP 5: BUILD FFMPEG COMMAND ===
     args.jobLog('\n━━━ Building FFmpeg Command ━━━');
 
-    // Create working file path
-    const workingDir = path.dirname(inputFile);
-    const baseName = path.basename(inputFile, path.extname(inputFile));
-    const workingFile = path.join(workingDir, `${baseName}_processed${path.extname(inputFile)}`);
-
     const ffmpegArgs = [
-      '-i', inputFile,
+      '-i', sourceFile,
       '-map_metadata', '0', // Preserve metadata
       '-map_chapters', '0'  // Preserve chapters
     ];
@@ -391,13 +454,13 @@ module.exports = async (args) => {
       throw new Error('Working file was not created');
     }
 
-    const inputStats = fs.statSync(inputFile);
+    const sourceStats = fs.statSync(sourceFile);
     const outputStats = fs.statSync(workingFile);
     
     args.jobLog(`✅ Processing complete:`);
-    args.jobLog(`  Input size: ${(inputStats.size / 1024 / 1024).toFixed(2)} MB`);
+    args.jobLog(`  Source size: ${(sourceStats.size / 1024 / 1024).toFixed(2)} MB`);
     args.jobLog(`  Output size: ${(outputStats.size / 1024 / 1024).toFixed(2)} MB`);
-    args.jobLog(`  Size change: ${((outputStats.size - inputStats.size) / 1024 / 1024).toFixed(2)} MB`);
+    args.jobLog(`  Size change: ${((outputStats.size - sourceStats.size) / 1024 / 1024).toFixed(2)} MB`);
     args.jobLog(`  Streams: ${totalOriginalStreams} → ${totalKeptStreams}`);
 
     // === STEP 8: RETURN WORKING FILE ===
@@ -429,18 +492,25 @@ module.exports = async (args) => {
   } catch (error) {
     args.jobLog(`❌ Preprocessing failed: ${error.message}`);
     
-    // Clean up working file if it exists
-    const workingDir = path.dirname(inputFile);
-    const baseName = path.basename(inputFile, path.extname(inputFile));
-    const workingFile = path.join(workingDir, `${baseName}_processed${path.extname(inputFile)}`);
-    
-    if (fs.existsSync(workingFile)) {
-      try {
-        fs.unlinkSync(workingFile);
-        args.jobLog('✓ Cleaned up partial working file');
-      } catch (cleanupError) {
-        args.jobLog('⚠️ Could not clean up working file');
+    // Clean up working file if it exists (use variables from file location determination)
+    try {
+      const hasWorkingDir = args.workDir && args.workDir.trim() !== '';
+      
+      let cleanupWorkingFile;
+      if (hasWorkingDir) {
+        const baseFileName = path.basename(inputFile);
+        cleanupWorkingFile = path.join(args.workDir, baseFileName);
+      } else {
+        cleanupWorkingFile = inputFile;
       }
+      
+      // Only delete if it's a working file (not the original input file)
+      if (fs.existsSync(cleanupWorkingFile) && cleanupWorkingFile !== inputFile) {
+        fs.unlinkSync(cleanupWorkingFile);
+        args.jobLog('✓ Cleaned up partial working file');
+      }
+    } catch (cleanupError) {
+      args.jobLog('⚠️ Could not clean up working file');
     }
     
     // Return original file on failure

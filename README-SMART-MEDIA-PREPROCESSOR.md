@@ -55,6 +55,30 @@ This plugin replaces the previous 3-stage `better-media-processor` approach with
 2. Connect output to your standard transcoding plugins
 3. The plugin will create a working file only when preprocessing is needed
 
+### File Handling Behavior
+
+The plugin intelligently handles different Tdarr flow scenarios:
+
+**Scenario 1: Early in Flow (No Working Directory)**
+- Uses library file as source
+- Creates working directory if needed
+- Outputs preprocessed file to working directory
+- Subsequent plugins work with the working file
+
+**Scenario 2: Working Directory Exists, No Working File**
+- Uses library file as source
+- Outputs preprocessed file to existing working directory
+- Maintains proper Tdarr file tracking
+
+**Scenario 3: Working File Already Exists**
+- Uses existing working file as source
+- Processes in-place or creates new working file
+- Handles cases where previous plugins already copied the file
+
+**Scenario 4: No Working Directory Provided**
+- Processes library file in-place
+- Suitable for flows that don't use working directories
+
 ### Supported Containers
 - **MKV** (Matroska)
 - **MP4** (including M4V)
