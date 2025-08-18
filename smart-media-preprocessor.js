@@ -557,16 +557,15 @@ module.exports = async (args) => {
     args.jobLog(`  🎯 English content prioritized for maximum compatibility`);
 
     // Update the input file object to point to the processed working file
-    // Following Tdarr's pattern: return only the filename, not the full path
-    // The Execute plugin will construct the full path using getPluginWorkDir() + getFileName()
-    const finalWorkingFileName = path.basename(workingFile);
+    // CRITICAL: Must return the full path to the working file, not just filename
+    // Subsequent plugins expect _id to be a valid file path they can access
     
-    args.jobLog(`Returning working file name: ${finalWorkingFileName}`);
+    args.jobLog(`Returning working file path: ${workingFile}`);
     args.jobLog(`Working file created at: ${workingFile}`);
     
     const updatedFileObj = {
       ...args.inputFileObj,
-      _id: finalWorkingFileName
+      _id: workingFile
     };
 
     return {
@@ -578,7 +577,7 @@ module.exports = async (args) => {
   } catch (error) {
     args.jobLog(`❌ Preprocessing failed: ${error.message}`);
     
-    // Clean up working file if it exists (use variables from file location determination)
+    // Clean up working file if it exists
     try {
       const hasWorkingDir = args.workDir && args.workDir.trim() !== '';
       
