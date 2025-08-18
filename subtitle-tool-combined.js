@@ -18,20 +18,19 @@ module.exports = async (args) => {
   const isMKV = ext === 'mkv' || container === 'mkv' || container === 'matroska';
   const isMP4 = ext === 'mp4' || container === 'mp4' || ext === 'm4v';
 
-  console.log('═══════════════════════════════════════');
-  console.log('   COMBINED SUBTITLE PROCESSOR');
-  console.log('═══════════════════════════════════════');
-  console.log(`File: ${inputFile}`);
-  console.log(`Container: ${args.inputFileObj.container}`);
+  args.jobLog('═══════════════════════════════════════');
+  args.jobLog('   COMBINED SUBTITLE PROCESSOR');
+  args.jobLog('═══════════════════════════════════════');
+  args.jobLog(`File: ${inputFile}`);
+  args.jobLog(`Container: ${args.inputFileObj.container}`);
 
   // Early exit for unsupported containers
   if (!isMKV && !isMP4) {
-    console.log('❌ Not MKV or MP4 — skipping');
+    args.jobLog('❌ Not MKV or MP4 — skipping');
     return {
       outputFileObj: args.inputFileObj,
       outputNumber: 2,
       variables: args.variables,
-      processFile: false
     };
   }
 
@@ -58,35 +57,21 @@ module.exports = async (args) => {
     return textFormats.some(format => codec.toLowerCase().includes(format));
   }
 
-  // Setup working directory
-  let workDir = 'Y:/cache';
-  if (args.librarySettings && args.librarySettings.cache) {
-    workDir = args.librarySettings.cache;
-  }
-
-  try {
-    if (!fs.existsSync(workDir)) {
-      fs.mkdirSync(workDir, { recursive: true });
-    }
-  } catch (error) {
-    console.error(`❌ Failed to create working directory: ${error.message}`);
-    return {
-      outputFileObj: args.inputFileObj,
-      outputNumber: 2,
-      variables: args.variables,
-      processFile: false
-    };
-  }
-
-  // Create unique session ID
+  // Use Tdarr's working directory (cache) - no need to create custom directories
+  const workingDir = args.workDir;
+  
+  // Create unique session ID for file naming
   const inputFileHash = crypto.createHash('md5').update(inputFile).digest('hex').substring(0, 8);
-  const uniqueId = `${inputFileHash}_${process.pid}_${Date.now()}`;
-  console.log(`Session ID: ${uniqueId}`);
+  const sessionId = `${inputFileHash}_${process.pid}_${Date.now()}`;
+  
+  args.jobLog(`Session ID: ${sessionId}`);
+  args.jobLog(`Working directory (cache): ${workingDir}`);
+  args.jobLog(`Working with cache-based operations`);
 
   // ═══════════════════════════════════════
   // STAGE 1: INSPECT SUBTITLE TRACKS
   // ═══════════════════════════════════════
-  console.log('\n━━━ STAGE 1: INSPECTING TRACKS ━━━');
+  args.jobLog('\n━━━ STAGE 1: INSPECTING TRACKS ━━━');
   
   let tracks = [];
   let subtitleTracks = [];
@@ -162,15 +147,14 @@ module.exports = async (args) => {
     }
 
     subtitleTracks = tracks.filter(t => t.type === 'subtitles');
-    console.log(`✓ Found ${subtitleTracks.length} subtitle tracks`);
+    args.jobLog(`✓ Found ${subtitleTracks.length} subtitle tracks`);
 
     if (subtitleTracks.length === 0) {
-      console.log('⚠️ No subtitle tracks — skipping');
+      args.jobLog('⚠️ No subtitle tracks — skipping');
       return {
         outputFileObj: args.inputFileObj,
         outputNumber: 2,
         variables: args.variables,
-        processFile: false
       };
     }
 
@@ -179,16 +163,15 @@ module.exports = async (args) => {
     console.error('❌ Error inspecting tracks:', msg);
     return {
       outputFileObj: args.inputFileObj,
-      outputNumber: 2,
+      outputNumber: 3,
       variables: args.variables,
-      processFile: false
     };
   }
 
   // ═══════════════════════════════════════
   // STAGE 2: ANALYZE SUBTITLE TRACKS
   // ═══════════════════════════════════════
-  console.log('\n━━━ STAGE 2: ANALYZING TRACKS ━━━');
+  args.jobLog('\n━━━ STAGE 2: ANALYZING TRACKS ━━━');
   
   const analysis = {
     toConvert: [],
@@ -201,7 +184,7 @@ module.exports = async (args) => {
     const codec = track.codec.toLowerCase();
     const lang = (track.language || '').toLowerCase();
     
-    console.log(`Track ${track.id}: ${track.codec} (${track.language || 'und'})`);
+    args.jobLog(`Track ${track.id}: ${track.codec} (${track.language || 'und'})`);
     
     // Mark English track for default flag
     if ((lang === 'eng' || lang === 'en' || lang === 'english') && !analysis.englishTrackId) {
@@ -211,10 +194,10 @@ module.exports = async (args) => {
     // Categorize by type
     if (isBitmapSubtitle(codec)) {
       analysis.toDiscard.push({ id: track.id, codec: track.codec, language: track.language });
-      console.log(`  → DISCARD (bitmap)`);
+      args.jobLog(`  → DISCARD (bitmap)`);
     } else if (isSRTSubtitle(codec)) {
       analysis.toKeep.push({ id: track.id, codec: track.codec, language: track.language });
-      console.log(`  → KEEP (already SRT)`);
+      args.jobLog(`  → KEEP (already SRT)`);
     } else if (isTextSubtitle(codec)) {
       let format = 'text';
       if (codec.includes('ass') || codec.includes('ssa')) format = 'ass';
@@ -222,22 +205,22 @@ module.exports = async (args) => {
       else if (codec.includes('mov_text')) format = 'mov_text';
       
       analysis.toConvert.push({ id: track.id, codec: track.codec, language: track.language, format: format });
-      console.log(`  → CONVERT (${format} to SRT)`);
+      args.jobLog(`  → CONVERT (${format} to SRT)`);
     } else {
       analysis.toConvert.push({ id: track.id, codec: track.codec, language: track.language, format: 'unknown' });
-      console.log(`  → CONVERT (unknown format)`);
+      args.jobLog(`  → CONVERT (unknown format)`);
     }
   });
 
   const needsProcessing = analysis.toConvert.length > 0 || analysis.toDiscard.length > 0;
-  console.log(`\nProcessing needed: ${needsProcessing ? 'YES' : 'NO'}`);
-  console.log(`  Convert: ${analysis.toConvert.length}, Keep: ${analysis.toKeep.length}, Discard: ${analysis.toDiscard.length}`);
+  args.jobLog(`\nProcessing needed: ${needsProcessing ? 'YES' : 'NO'}`);
+  args.jobLog(`  Convert: ${analysis.toConvert.length}, Keep: ${analysis.toKeep.length}, Discard: ${analysis.toDiscard.length}`);
 
   if (!needsProcessing) {
-    console.log('✓ All subtitles are already in SRT format');
+    args.jobLog('✓ All subtitles are already in SRT format');
     return {
       outputFileObj: args.inputFileObj,
-      outputNumber: 1,
+      outputNumber: 2,
       variables: args.variables
     };
   }
@@ -245,7 +228,7 @@ module.exports = async (args) => {
   // ═══════════════════════════════════════
   // STAGE 3: EXTRACT SUBTITLE TRACKS
   // ═══════════════════════════════════════
-  console.log('\n━━━ STAGE 3: EXTRACTING TRACKS ━━━');
+  args.jobLog('\n━━━ STAGE 3: EXTRACTING TRACKS ━━━');
   
   const extractedFiles = [];
   const tracksToExtract = [...analysis.toConvert, ...analysis.toKeep]; // Skip bitmap tracks
@@ -263,8 +246,8 @@ module.exports = async (args) => {
       else if (track.format === 'mov_text') extension = 'txt';
     }
     
-    const outputFile = path.join(workDir, `subtitle_${uniqueId}_${track.id}.${extension}`);
-    console.log(`Extracting Track ${track.id} (${track.format || track.codec}) → ${path.basename(outputFile)}`);
+    const outputFile = path.join(workingDir, `${sessionId}_subtitle_${track.id}.${extension}`);
+    args.jobLog(`Extracting Track ${track.id} (${track.format || track.codec}) → ${path.basename(outputFile)}`);
     
     try {
       let success = false;
@@ -321,7 +304,7 @@ module.exports = async (args) => {
       
       if (success) {
         const stats = fs.statSync(outputFile);
-        console.log(`  ✓ Extracted: ${stats.size} bytes`);
+        args.jobLog(`  ✓ Extracted: ${stats.size} bytes`);
         extractedFiles.push({
           trackId: track.id,
           inputFile: outputFile,
@@ -332,20 +315,20 @@ module.exports = async (args) => {
           extension: extension
         });
       } else {
-        console.log(`  ❌ Extraction failed`);
+        args.jobLog(`  ❌ Extraction failed`);
       }
       
     } catch (error) {
-      console.log(`  ❌ Error: ${error.message}`);
+      args.jobLog(`  ❌ Error: ${error.message}`);
     }
   }
 
-  console.log(`✓ Extracted ${extractedFiles.length}/${tracksToExtract.length} tracks`);
+  args.jobLog(`✓ Extracted ${extractedFiles.length}/${tracksToExtract.length} tracks`);
 
   // ═══════════════════════════════════════
   // STAGE 4: CONVERT TO SRT
   // ═══════════════════════════════════════
-  console.log('\n━━━ STAGE 4: CONVERTING TO SRT ━━━');
+  args.jobLog('\n━━━ STAGE 4: CONVERTING TO SRT ━━━');
   
   const finalSrtFiles = [];
   const ffmpegExe = resolveBin([
@@ -355,23 +338,24 @@ module.exports = async (args) => {
   ]) || 'ffmpeg';
 
   for (const file of extractedFiles) {
-    const outputFile = path.join(workDir, `subtitle_${uniqueId}_${file.trackId}.srt`);
+    const outputFile = path.join(workingDir, `${sessionId}_subtitle_${file.trackId}.srt`);
     
     try {
       if (file.trackType === 'keep') {
         // Already SRT - just copy
         fs.copyFileSync(file.inputFile, outputFile);
-        console.log(`Track ${file.trackId}: Copied existing SRT`);
+        args.jobLog(`Track ${file.trackId}: Copied existing SRT`);
       } else {
         // Convert to SRT
         const ffmpegCmd = `"${ffmpegExe}" -i "${file.inputFile}" -c:s srt "${outputFile}" -y`;
+        const { execSync } = require('child_process');
         execSync(ffmpegCmd, { encoding: 'utf8', maxBuffer: 1024 * 1024 * 10, timeout: 120000 });
-        console.log(`Track ${file.trackId}: Converted ${file.format} → SRT`);
+        args.jobLog(`Track ${file.trackId}: Converted ${file.format} → SRT`);
       }
       
       if (fs.existsSync(outputFile)) {
         const stats = fs.statSync(outputFile);
-        console.log(`  ✓ ${stats.size} bytes`);
+        args.jobLog(`  ✓ ${stats.size} bytes`);
         
         finalSrtFiles.push({
           trackId: file.trackId,
@@ -387,19 +371,20 @@ module.exports = async (args) => {
       }
       
     } catch (error) {
-      console.log(`  ❌ Error converting track ${file.trackId}: ${error.message}`);
+      args.jobLog(`  ❌ Error converting track ${file.trackId}: ${error.message}`);
     }
   }
 
-  console.log(`✓ Created ${finalSrtFiles.length} SRT files`);
+  args.jobLog(`✓ Created ${finalSrtFiles.length} SRT files`);
 
   // ═══════════════════════════════════════
   // STAGE 5: REMUX WITH SRT SUBTITLES
   // ═══════════════════════════════════════
-  console.log('\n━━━ STAGE 5: REMUXING FILE ━━━');
+  args.jobLog('\n━━━ STAGE 5: REMUXING FILE ━━━');
   
-  const tempOutput = path.join(workDir, `temp_${uniqueId}_${fileName}`);
-  console.log(`Creating: ${path.basename(tempOutput)}`);
+  // Create output file in cache directory - this becomes the working file
+  const outputFile = path.join(workingDir, `${sessionId}_remuxed_${fileName}`);
+  args.jobLog(`Creating: ${path.basename(outputFile)}`);
 
   try {
     if (isMKV) {
@@ -408,7 +393,7 @@ module.exports = async (args) => {
         'C:\\Program Files (x86)\\MKVToolNix\\mkvmerge.exe'
       ]) || 'mkvmerge';
 
-      let mkvmergeCmd = `"${mkvmergeExe}" -o "${tempOutput}" --no-subtitles "${inputFile}"`;
+      let mkvmergeCmd = `"${mkvmergeExe}" -o "${outputFile}" --no-subtitles "${inputFile}"`;
       
       finalSrtFiles.forEach(file => {
         const lang = file.language || 'und';
@@ -416,6 +401,7 @@ module.exports = async (args) => {
         mkvmergeCmd += ` --language 0:${lang} --default-track 0:${isDefault} --track-name 0:"" "${file.srtFile}"`;
       });
       
+      const { execSync } = require('child_process');
       execSync(mkvmergeCmd, { encoding: 'utf8', maxBuffer: 1024 * 1024 * 10 });
       
     } else if (isMP4) {
@@ -438,26 +424,50 @@ module.exports = async (args) => {
         }
       });
       
-      ffmpegCmd += ` -y "${tempOutput}"`;
+      ffmpegCmd += ` -y "${outputFile}"`;
+      const { execSync } = require('child_process');
       execSync(ffmpegCmd, { encoding: 'utf8', maxBuffer: 1024 * 1024 * 10 });
     }
 
-    // Verify and replace original file
-    if (fs.existsSync(tempOutput)) {
+    // Verify output file was created
+    if (fs.existsSync(outputFile)) {
       const inputStats = fs.statSync(inputFile);
-      const outputStats = fs.statSync(tempOutput);
+      const outputStats = fs.statSync(outputFile);
       
-      console.log(`✓ Remux complete: ${(inputStats.size / 1024 / 1024).toFixed(2)} MB → ${(outputStats.size / 1024 / 1024).toFixed(2)} MB`);
+      args.jobLog(`✓ Remux complete: ${(inputStats.size / 1024 / 1024).toFixed(2)} MB → ${(outputStats.size / 1024 / 1024).toFixed(2)} MB`);
       
-      // Replace original file
-      fs.copyFileSync(tempOutput, inputFile);
-      fs.unlinkSync(tempOutput);
-      console.log('✓ File replaced successfully');
+      // Clean up session-based temporary SRT files (but keep the remuxed file)
+      args.jobLog('\nCleaning up temporary files...');
+      for (const file of finalSrtFiles) {
+        try {
+          if (fs.existsSync(file.srtFile)) {
+            fs.unlinkSync(file.srtFile);
+          }
+        } catch (error) {
+          // Ignore cleanup errors
+        }
+      }
       
-      // Update file object
-      args.inputFileObj.file_size = outputStats.size / 1024 / 1024;
+      // Update variables
       args.variables.subtitleChangesApplied = true;
-      args.variables.forceReplaceOriginal = true;
+      
+      // Final summary
+      args.jobLog('\n═══════════════════════════════════════');
+      args.jobLog('   SUBTITLE PROCESSING COMPLETE');
+      args.jobLog('═══════════════════════════════════════');
+      
+      const totalOriginalSubs = analysis.toConvert.length + analysis.toKeep.length + analysis.toDiscard.length;
+      args.jobLog(`✓ Original tracks: ${totalOriginalSubs} → Final SRT tracks: ${finalSrtFiles.length}`);
+      args.jobLog(`✓ Converted: ${analysis.toConvert.length}, Preserved: ${analysis.toKeep.length}, Discarded: ${analysis.toDiscard.length}`);
+      args.jobLog('✓ File now contains ONLY SRT subtitles');
+      args.jobLog(`✓ Working file: ${path.basename(outputFile)}`);
+      
+      // Return the cache file as the working file - Tdarr will handle the rest
+      return {
+        outputFileObj: { _id: outputFile },
+        outputNumber: 1,
+        variables: args.variables
+      };
       
     } else {
       throw new Error('Output file was not created');
@@ -466,44 +476,26 @@ module.exports = async (args) => {
   } catch (error) {
     console.error('❌ Error during remux:', error.message);
     
-    // Clean up temp file
-    if (fs.existsSync(tempOutput)) {
-      fs.unlinkSync(tempOutput);
+    // Clean up temp files on error
+    if (fs.existsSync(outputFile)) {
+      fs.unlinkSync(outputFile);
+    }
+    
+    // Clean up SRT files
+    for (const file of finalSrtFiles) {
+      try {
+        if (fs.existsSync(file.srtFile)) {
+          fs.unlinkSync(file.srtFile);
+        }
+      } catch (error) {
+        // Ignore cleanup errors
+      }
     }
     
     return {
       outputFileObj: args.inputFileObj,
-      outputNumber: 2,
+      outputNumber: 3,
       variables: args.variables,
-      processFile: false
     };
   }
-
-  // Clean up ALL temporary SRT files
-  console.log('\nCleaning up temporary files...');
-  for (const file of finalSrtFiles) {
-    try {
-      if (fs.existsSync(file.srtFile)) {
-        fs.unlinkSync(file.srtFile);
-      }
-    } catch (error) {
-      // Ignore cleanup errors
-    }
-  }
-
-  // Final summary
-  console.log('\n═══════════════════════════════════════');
-  console.log('   SUBTITLE PROCESSING COMPLETE');
-  console.log('═══════════════════════════════════════');
-  
-  const totalOriginalSubs = analysis.toConvert.length + analysis.toKeep.length + analysis.toDiscard.length;
-  console.log(`✓ Original tracks: ${totalOriginalSubs} → Final SRT tracks: ${finalSrtFiles.length}`);
-  console.log(`✓ Converted: ${analysis.toConvert.length}, Preserved: ${analysis.toKeep.length}, Discarded: ${analysis.toDiscard.length}`);
-  console.log('✓ File now contains ONLY SRT subtitles');
-
-  return {
-    outputFileObj: args.inputFileObj,
-    outputNumber: 1,
-    variables: args.variables
-  };
 };

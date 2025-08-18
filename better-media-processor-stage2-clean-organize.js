@@ -9,29 +9,28 @@ module.exports = async (args) => {
   args.jobLog('   STAGE 2: CLEAN AND ORGANIZE');
   args.jobLog('═══════════════════════════════════════');
 
-  const extractDir = args.variables.extractDir;
+  const workingDir = args.variables.workingDir || args.workDir;
   const sessionId = args.variables.sessionId;
   const containerType = args.variables.containerType;
 
-  if (!extractDir || !fs.existsSync(extractDir)) {
-    args.jobLog('❌ No extraction directory found');
+  if (!workingDir || !fs.existsSync(workingDir)) {
+    args.jobLog('❌ No working directory found');
     return {
       outputFileObj: args.inputFileObj,
       outputNumber: 2,
       variables: args.variables,
-      processFile: false
     };
   }
 
   args.jobLog(`Session ID: ${sessionId}`);
-  args.jobLog(`Working directory: ${extractDir}`);
+  args.jobLog(`Working directory (cache): ${workingDir}`);
 
   // Get original track metadata (needed for both audio and subtitle processing)
   const trackMetadata = args.variables.trackMetadata || {};
 
-  // Get all extracted files
-  const allFiles = fs.readdirSync(extractDir);
-  args.jobLog(`Found ${allFiles.length} extracted files`);
+  // Get all extracted files for this session
+  const allFiles = fs.readdirSync(workingDir).filter(file => file.startsWith(sessionId));
+  args.jobLog(`Found ${allFiles.length} extracted files for session`);
 
   // Categorize files
   const videoFiles = [];
@@ -39,7 +38,7 @@ module.exports = async (args) => {
   const subtitleFiles = [];
 
   allFiles.forEach(file => {
-    const filePath = path.join(extractDir, file);
+    const filePath = path.join(workingDir, file);
     const stats = fs.statSync(filePath);
     
     if (file.includes('_video_') || file.includes('_h264') || file.includes('_h265') || file.includes('_vp9')) {
@@ -343,7 +342,7 @@ module.exports = async (args) => {
         const ffmpegExe = 'ffmpeg';
 
         const srtFileName = subFile.file.replace(/\.(ass|vtt|txt|sub)$/, '.srt');
-        const srtFilePath = path.join(extractDir, srtFileName);
+        const srtFilePath = path.join(workingDir, srtFileName);
 
         try {
           args.jobLog(`    🔄 Converting ${subFile.file} to SRT...`);
@@ -423,18 +422,21 @@ module.exports = async (args) => {
   if (!keptVideoFile && keptAudioFiles.length === 0) {
     args.jobLog('❌ No video or audio files to process');
     
-    // Clean up
+    // Clean up session files from cache
     try {
-      fs.rmSync(extractDir, { recursive: true, force: true });
+      const sessionFiles = fs.readdirSync(workingDir).filter(file => file.startsWith(sessionId));
+      sessionFiles.forEach(file => {
+        fs.unlinkSync(path.join(workingDir, file));
+      });
+      args.jobLog(`✓ Cleaned up ${sessionFiles.length} session files from cache`);
     } catch (error) {
-      args.jobLog(`⚠️ Could not clean up directory: ${error.message}`);
+      args.jobLog(`⚠️ Could not clean up session files: ${error.message}`);
     }
     
     return {
       outputFileObj: args.inputFileObj,
       outputNumber: 2,
       variables: args.variables,
-      processFile: false
     };
   }
 

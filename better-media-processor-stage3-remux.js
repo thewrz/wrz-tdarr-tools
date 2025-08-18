@@ -9,7 +9,7 @@ module.exports = async (args) => {
   args.jobLog('   STAGE 3: REMUX WITH PROPER ORDERING');
   args.jobLog('═══════════════════════════════════════');
 
-  const extractDir = args.variables.extractDir;
+  const workingDir = args.variables.workingDir || args.workDir;
   const sessionId = args.variables.sessionId;
   const originalFile = args.variables.originalFile;
   const containerType = args.variables.containerType;
@@ -17,17 +17,17 @@ module.exports = async (args) => {
   const finalAudioFiles = args.variables.finalAudioFiles || [];
   const finalSubtitleFiles = args.variables.finalSubtitleFiles || [];
 
-  if (!extractDir || !fs.existsSync(extractDir)) {
-    args.jobLog('❌ No extraction directory found');
+  if (!workingDir || !fs.existsSync(workingDir)) {
+    args.jobLog('❌ No working directory found');
     return {
       outputFileObj: args.inputFileObj,
       outputNumber: 2,
       variables: args.variables,
-      processFile: false
     };
   }
 
   args.jobLog(`Session ID: ${sessionId}`);
+  args.jobLog(`Working directory (cache): ${workingDir}`);
   args.jobLog(`Original file: ${originalFile}`);
   args.jobLog(`Container type: ${containerType}`);
 
@@ -35,23 +35,26 @@ module.exports = async (args) => {
   if (!finalVideoFile && finalAudioFiles.length === 0) {
     args.jobLog('❌ No streams to remux');
     
-    // Clean up
+    // Clean up session files from cache
     try {
-      fs.rmSync(extractDir, { recursive: true, force: true });
+      const sessionFiles = fs.readdirSync(workingDir).filter(file => file.startsWith(sessionId));
+      sessionFiles.forEach(file => {
+        fs.unlinkSync(path.join(workingDir, file));
+      });
+      args.jobLog(`✓ Cleaned up ${sessionFiles.length} session files from cache`);
     } catch (error) {
-      args.jobLog(`⚠️ Could not clean up directory: ${error.message}`);
+      args.jobLog(`⚠️ Could not clean up session files: ${error.message}`);
     }
     
     return {
       outputFileObj: args.inputFileObj,
       outputNumber: 2,
       variables: args.variables,
-      processFile: false
     };
   }
 
-  // Create output file path
-  const outputFile = path.join(path.dirname(extractDir), `remuxed_${sessionId}_${path.basename(originalFile)}`);
+  // Create output file path in cache (working directory)
+  const outputFile = path.join(workingDir, `remuxed_${sessionId}_${path.basename(originalFile)}`);
   
   args.jobLog(`Output file: ${outputFile}`);
   args.jobLog('\nStreams to include:');
@@ -421,24 +424,14 @@ module.exports = async (args) => {
     args.jobLog(`  New size: ${(outputStats.size / 1024 / 1024).toFixed(2)} MB`);
     args.jobLog(`  Size difference: ${((outputStats.size - originalStats.size) / 1024 / 1024).toFixed(2)} MB`);
 
-    // Replace original file with new one
-    args.jobLog('\n━━━ Replacing Original File ━━━');
-    try {
-      // Copy new file to original location
-      fs.copyFileSync(outputFile, originalFile);
-      args.jobLog('✓ Original file replaced successfully');
-      
-      // Delete temporary output file
-      fs.unlinkSync(outputFile);
-      args.jobLog('✓ Temporary output file cleaned up');
-      
-      // Update file object
-      args.inputFileObj.file_size = outputStats.size / 1024 / 1024; // Convert to MB
-      
-    } catch (copyError) {
-      args.jobLog(`❌ Failed to replace original file: ${copyError.message}`);
-      throw new Error(`Failed to replace original file: ${copyError.message}`);
-    }
+    // Set remuxed file as the new working file (cache-based approach)
+    args.jobLog('\n━━━ Setting Remuxed File as Working File ━━━');
+    args.jobLog('✓ Remuxed file created in cache - will be used as working file');
+    args.jobLog('✓ Original library file remains untouched during processing');
+    args.jobLog('✓ Cache-based operations complete - ready for transcoding stages');
+    
+    // Update file object to point to the remuxed cache file
+    args.inputFileObj.file_size = outputStats.size / 1024 / 1024; // Convert to MB
 
   } catch (error) {
     args.jobLog(`❌ Remuxing failed: ${error.message}`);
@@ -453,30 +446,26 @@ module.exports = async (args) => {
       }
     }
     
-    // Clean up extraction directory
+    // Clean up session files from cache
     try {
-      fs.rmSync(extractDir, { recursive: true, force: true });
-      args.jobLog('✓ Cleaned up extraction directory');
+      const sessionFiles = fs.readdirSync(workingDir).filter(file => file.startsWith(sessionId));
+      sessionFiles.forEach(file => {
+        fs.unlinkSync(path.join(workingDir, file));
+      });
+      args.jobLog(`✓ Cleaned up ${sessionFiles.length} session files from cache`);
     } catch (cleanupError) {
-      args.jobLog('⚠️ Could not clean up extraction directory');
+      args.jobLog('⚠️ Could not clean up session files');
     }
     
     return {
       outputFileObj: args.inputFileObj,
       outputNumber: 2,
       variables: args.variables,
-      processFile: false
     };
   }
 
-  // Clean up extraction directory
-  args.jobLog('\n━━━ Final Cleanup ━━━');
-  try {
-    fs.rmSync(extractDir, { recursive: true, force: true });
-    args.jobLog('✓ Extraction directory cleaned up');
-  } catch (error) {
-    args.jobLog(`⚠️ Could not clean up extraction directory: ${error.message}`);
-  }
+  // Note: Session cleanup is handled in the final return section below
+  // No need for additional cleanup here as we're working with cache files
 
   args.jobLog('\n═══════════════════════════════════════');
   args.jobLog('   MEDIA PROCESSING COMPLETE');
@@ -498,10 +487,28 @@ module.exports = async (args) => {
   args.jobLog('   ✓ Only English content preserved');
   args.jobLog('   ✓ Proper stream ordering (video → audio → subtitles)');
   args.jobLog('   ✓ Correct language tagging and default flags');
-  args.jobLog('   ✓ Minimal memory usage (file-based processing)');
+  args.jobLog('   ✓ Cache-based operations (no library file replacement during processing)');
 
+  // Clean up session files (except the final remuxed file)
+  args.jobLog('\n━━━ Session Cleanup ━━━');
+  try {
+    const sessionFiles = fs.readdirSync(workingDir).filter(file => 
+      file.startsWith(sessionId) && file !== path.basename(outputFile)
+    );
+    sessionFiles.forEach(file => {
+      fs.unlinkSync(path.join(workingDir, file));
+    });
+    args.jobLog(`✓ Cleaned up ${sessionFiles.length} intermediate session files`);
+    args.jobLog(`✓ Kept final remuxed file: ${path.basename(outputFile)}`);
+  } catch (error) {
+    args.jobLog(`⚠️ Could not clean up session files: ${error.message}`);
+  }
+
+  // Return the remuxed cache file as the new working file
   return {
-    outputFileObj: args.inputFileObj,
+    outputFileObj: {
+      _id: outputFile
+    },
     outputNumber: 1,
     variables: args.variables
   };

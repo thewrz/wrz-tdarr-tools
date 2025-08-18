@@ -27,47 +27,24 @@ module.exports = async (args) => {
       outputFileObj: args.inputFileObj,
       outputNumber: 2,
       variables: args.variables,
-      processFile: false
     };
   }
 
-  // Create unique session ID
+  // Create unique session ID for file naming
   const inputFileHash = crypto.createHash('md5').update(inputFile).digest('hex').substring(0, 8);
   const sessionId = `${inputFileHash}_${process.pid}_${Date.now()}`;
   
-  // Determine working directory
-  let workDir = 'Y:/cache';
-  if (args.librarySettings && args.librarySettings.cache) {
-    workDir = args.librarySettings.cache;
-  }
+  // Use Tdarr's working directory (cache) - no need to create custom directories
+  const workingDir = args.workDir;
   
-  // Fix malformed cache paths
-  if (workDir.includes('Y:Y:/')) {
-    workDir = workDir.replace('Y:Y:/', 'Y:/');
-  }
-  
-  const extractDir = path.join(workDir, `extract_${sessionId}`);
-  
-  try {
-    if (!fs.existsSync(extractDir)) {
-      fs.mkdirSync(extractDir, { recursive: true });
-    }
-  } catch (error) {
-    console.error(`❌ Failed to create extraction directory: ${error.message}`);
-    return {
-      outputFileObj: args.inputFileObj,
-      outputNumber: 2,
-      variables: args.variables,
-      processFile: false
-    };
-  }
-
   args.jobLog(`Session ID: ${sessionId}`);
-  args.jobLog(`Extraction directory: ${extractDir}`);
+  args.jobLog(`Working directory (cache): ${workingDir}`);
+  args.jobLog(`Input file: ${inputFile}`);
+  args.jobLog(`Working with cache-based operations`);
 
   // Store session info
   args.variables.sessionId = sessionId;
-  args.variables.extractDir = extractDir;
+  args.variables.workingDir = workingDir;
   args.variables.originalFile = inputFile;
   args.variables.containerType = isMKV ? 'mkv' : 'mp4';
 
@@ -138,7 +115,7 @@ module.exports = async (args) => {
           else extension = 'sub';
         }
         
-        const outputFile = path.join(extractDir, `track_${track.id}_${track.type}_${extension}`);
+        const outputFile = path.join(workingDir, `${sessionId}_track_${track.id}_${track.type}_${extension}`);
         extractArgs.push(`${track.id}:${outputFile}`);
         
         const title = props.track_name ? ` "${props.track_name}"` : '';
@@ -235,7 +212,7 @@ module.exports = async (args) => {
           else extension = 'sub';
         }
         
-        const outputFile = path.join(extractDir, `stream_${i}_${stream.codec_type}_${extension}`);
+        const outputFile = path.join(workingDir, `${sessionId}_stream_${i}_${stream.codec_type}_${extension}`);
         
         args.jobLog(`  Stream ${i}: ${stream.codec_type} (${stream.codec_name}) → ${path.basename(outputFile)}`);
         
@@ -285,11 +262,11 @@ module.exports = async (args) => {
 
     // List extracted files
     args.jobLog('\n━━━ Extraction Summary ━━━');
-    const extractedFiles = fs.readdirSync(extractDir);
-    args.jobLog(`✓ Extracted ${extractedFiles.length} files to temporary directory`);
+    const extractedFiles = fs.readdirSync(workingDir).filter(file => file.startsWith(sessionId));
+    args.jobLog(`✓ Extracted ${extractedFiles.length} files to cache directory`);
     
     extractedFiles.forEach(file => {
-      const filePath = path.join(extractDir, file);
+      const filePath = path.join(workingDir, file);
       const stats = fs.statSync(filePath);
       args.jobLog(`  ${file} (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
     });
@@ -297,20 +274,21 @@ module.exports = async (args) => {
   } catch (error) {
     console.error(`❌ Extraction failed: ${error.message}`);
     
-    // Clean up on failure
+    // Clean up on failure - remove session files from cache
     try {
-      if (fs.existsSync(extractDir)) {
-        fs.rmSync(extractDir, { recursive: true, force: true });
-      }
+      const sessionFiles = fs.readdirSync(workingDir).filter(file => file.startsWith(sessionId));
+      sessionFiles.forEach(file => {
+        fs.unlinkSync(path.join(workingDir, file));
+      });
+      args.jobLog(`✓ Cleaned up ${sessionFiles.length} session files from cache`);
     } catch (cleanupError) {
-      args.jobLog(`⚠️ Could not clean up extraction directory: ${cleanupError.message}`);
+      args.jobLog(`⚠️ Could not clean up session files: ${cleanupError.message}`);
     }
     
     return {
       outputFileObj: args.inputFileObj,
       outputNumber: 2,
       variables: args.variables,
-      processFile: false
     };
   }
 
