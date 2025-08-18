@@ -348,10 +348,9 @@ module.exports = async (args) => {
     args.jobLog(`Need conversion: ${subtitleConversions.length} streams`);
 
     // === STEP 4: CHECK IF PROCESSING IS NEEDED ===
-    const keptVideoStreams = videoStreams.length > 0 ? 1 : 0; // Only keep first video stream
-    const totalKeptStreams = keptVideoStreams + keptAudioStreams.length + keptSubtitleStreams.length;
+    const totalKeptStreams = videoStreams.length + keptAudioStreams.length + keptSubtitleStreams.length;
     const totalOriginalStreams = streams.length;
-    const needsProcessing = totalKeptStreams < totalOriginalStreams || subtitleConversions.length > 0 || videoStreams.length > 1;
+    const needsProcessing = totalKeptStreams < totalOriginalStreams || subtitleConversions.length > 0;
 
     if (!needsProcessing) {
       args.jobLog('\n✅ No preprocessing needed - file is already optimized');
