@@ -558,14 +558,15 @@ module.exports = async (args) => {
 
     // Update the input file object to point to the processed working file
     // Following Tdarr's pattern: return only the filename, not the full path
+    // The Execute plugin will construct the full path using getPluginWorkDir() + getFileName()
     const finalWorkingFileName = path.basename(workingFile);
-    const workingFileInWorkDir = path.join(args.workDir, finalWorkingFileName);
     
-    args.jobLog(`Returning working file: ${workingFileInWorkDir}`);
+    args.jobLog(`Returning working file name: ${finalWorkingFileName}`);
+    args.jobLog(`Working file created at: ${workingFile}`);
     
     const updatedFileObj = {
       ...args.inputFileObj,
-      _id: workingFileInWorkDir
+      _id: finalWorkingFileName
     };
 
     return {
