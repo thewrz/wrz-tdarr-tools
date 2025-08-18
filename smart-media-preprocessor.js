@@ -60,9 +60,22 @@ module.exports = async (args) => {
     
     if (hasWorkingDir) {
       workingDir = args.workDir;
-      // Always use just the base filename for the working file, never full paths
-      const baseFileName = path.basename(inputFile); // Use inputFile which is the current file being processed
+      // Extract just the filename, handling complex paths that may contain working directory structures
+      let baseFileName = path.basename(inputFile);
+      
+      // If the basename still contains path separators, extract just the actual filename
+      if (baseFileName.includes('\\') || baseFileName.includes('/')) {
+        // Split by both types of separators and take the last part
+        const parts = baseFileName.split(/[\\\/]/);
+        baseFileName = parts[parts.length - 1];
+      }
+      
+      // Remove any remaining path artifacts
+      baseFileName = baseFileName.replace(/^.*[\\\/]/, '');
+      
       workingFile = path.join(workingDir, baseFileName);
+      
+      args.jobLog(`Extracted base filename: ${baseFileName}`);
       
       // Check if working directory exists
       if (!fs.existsSync(workingDir)) {
@@ -481,12 +494,16 @@ module.exports = async (args) => {
     args.jobLog(`  📋 Kept ${keptAudioStreams.length} audio + ${keptSubtitleStreams.length} subtitle streams`);
     args.jobLog(`  🎯 English content prioritized for maximum compatibility`);
 
+    // Update the input file object to point to the processed working file
+    const updatedFileObj = {
+      ...args.inputFileObj,
+      _id: workingFile
+    };
+
     return {
-      outputFileObj: {
-        _id: workingFile
-      },
-      outputNumber: 1,
-      variables: args.variables
+      outputFileObj: updatedFileObj,
+      outputNumber: 2,
+      variables: args.variables,
     };
 
   } catch (error) {
