@@ -218,25 +218,46 @@ module.exports = async (args) => {
     function detectLanguage(stream) {
       const title = (stream.tags?.title || '').toLowerCase();
       const language = (stream.tags?.language || '').toLowerCase();
+      
+      // Check for commentary first (highest priority)
       const textToCheck = `${title} ${language}`.trim();
-
-      // Check for commentary first
       if (commentaryPatterns.some(pattern => pattern.test(textToCheck))) {
         return 'commentary';
       }
 
-      // Check for supported languages
+      // Check if language tag is already a known ISO code (second priority)
+      if (['eng', 'en', 'english'].includes(language)) return 'eng';
+      if (['jpn', 'ja', 'japanese'].includes(language)) return 'jpn';
+      if (['kor', 'ko', 'korean'].includes(language)) return 'kor';
+      if (['fre', 'fr', 'french', 'fra'].includes(language)) return 'fre';
+
+      // Check title for language patterns (third priority - more thorough)
+      for (const [langCode, patterns] of Object.entries(languagePatterns)) {
+        // Check title first (more specific)
+        if (title && patterns.some(pattern => pattern.test(title))) {
+          return langCode;
+        }
+      }
+
+      // Check combined text as fallback (fourth priority)
       for (const [langCode, patterns] of Object.entries(languagePatterns)) {
         if (patterns.some(pattern => pattern.test(textToCheck))) {
           return langCode;
         }
       }
 
-      // Check if language tag is already a known code
-      if (['eng', 'en', 'english'].includes(language)) return 'eng';
-      if (['jpn', 'ja', 'japanese'].includes(language)) return 'jpn';
-      if (['kor', 'ko', 'korean'].includes(language)) return 'kor';
-      if (['fre', 'fr', 'french', 'fra'].includes(language)) return 'fre';
+      // If we still can't detect, check for common language indicators in title
+      if (title) {
+        // Additional title-based detection for edge cases
+        if (/\b(dub|dubbed)\b/i.test(title) && !/\b(sub|subtitle)\b/i.test(title)) {
+          // If it says "dub" but no specific language, assume English dub
+          return 'eng';
+        }
+        if (/\b(original|org)\b/i.test(title)) {
+          // Original audio - could be any language, but often Japanese for anime
+          // We'll still mark as unknown to let other logic handle it
+        }
+      }
 
       return 'unknown';
     }
@@ -298,13 +319,27 @@ module.exports = async (args) => {
       }
     }
     
-    // Then add other language tracks (Japanese, Korean, French, Unknown)
+    // Add other language tracks (Japanese, Korean, French)
     keptAudioStreams.push(
       ...audioCategories.japanese,
       ...audioCategories.korean,
-      ...audioCategories.french,
-      ...audioCategories.unknown
+      ...audioCategories.french
     );
+
+    // Handle unknown language streams - if language is undetectable, keep only the first one
+    if (audioCategories.unknown.length > 0) {
+      if (audioCategories.unknown.length === 1) {
+        // Only one unknown stream, keep it
+        keptAudioStreams.push(audioCategories.unknown[0]);
+        args.jobLog(`Keeping single unknown audio stream: stream ${audioCategories.unknown[0].index}`);
+      } else {
+        // Multiple unknown streams - keep only the first one
+        keptAudioStreams.push(audioCategories.unknown[0]);
+        args.jobLog(`⚠️ Multiple unknown audio streams detected (${audioCategories.unknown.length})`);
+        args.jobLog(`   Language undetectable - keeping only first stream: ${audioCategories.unknown[0].index}`);
+        args.jobLog(`   Skipping ${audioCategories.unknown.length - 1} additional unknown audio stream(s)`);
+      }
+    }
 
     // If no streams detected, keep all non-commentary streams as fallback
     if (keptAudioStreams.length === 0) {
@@ -319,6 +354,10 @@ module.exports = async (args) => {
 
     const keptSubtitleStreams = [];
     const subtitleConversions = [];
+    const subtitleCategories = {
+      english: [],
+      unknown: []
+    };
 
     subtitleStreams.forEach((stream, index) => {
       const title = (stream.tags?.title || '').toLowerCase();
@@ -327,35 +366,88 @@ module.exports = async (args) => {
       
       args.jobLog(`  Stream ${index}: "${stream.tags?.title || ''}" (${language}, ${codec})`);
 
-      // Check if it's English
-      const isEnglish = language === 'eng' || language === 'en' ||
-                       languagePatterns.eng.some(pattern => pattern.test(`${title} ${language}`));
-
-      if (!isEnglish) {
-        args.jobLog(`    → Skipping (not English)`);
-        return;
-      }
-
       // Skip bitmap subtitles (not convertible to SRT)
       if (['hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle'].includes(codec)) {
         args.jobLog(`    → Skipping (bitmap subtitle: ${codec})`);
         return;
       }
 
-      // Check if conversion is needed
+      // Check if it's English using enhanced detection
+      const isEnglish = language === 'eng' || language === 'en' ||
+                       languagePatterns.eng.some(pattern => pattern.test(`${title} ${language}`));
+
+      if (isEnglish) {
+        // Categorize as English
+        const streamData = { stream, index, codec };
+        subtitleCategories.english.push(streamData);
+        args.jobLog(`    → Detected as English`);
+      } else if (language === 'und' || language === '' || !language) {
+        // Unknown/undefined language - could be English but undetectable
+        const streamData = { stream, index, codec };
+        subtitleCategories.unknown.push(streamData);
+        args.jobLog(`    → Language undetectable (${language || 'undefined'})`);
+      } else {
+        // Non-English language, skip
+        args.jobLog(`    → Skipping (not English: ${language})`);
+        return;
+      }
+    });
+
+    // Process English subtitle streams
+    subtitleCategories.english.forEach(({ stream, index, codec }) => {
       if (['ass', 'ssa', 'webvtt', 'mov_text'].includes(codec)) {
-        args.jobLog(`    → Will convert ${codec} to SRT`);
+        args.jobLog(`    → Will convert ${codec} to SRT (English)`);
         subtitleConversions.push({ stream, index, codec });
         keptSubtitleStreams.push({ stream, index, needsConversion: true });
       } else if (codec === 'subrip') {
-        args.jobLog(`    → Keeping (already SRT)`);
+        args.jobLog(`    → Keeping (already SRT, English)`);
         keptSubtitleStreams.push({ stream, index, needsConversion: false });
       } else {
-        args.jobLog(`    → Keeping (${codec})`);
+        args.jobLog(`    → Keeping (${codec}, English)`);
         keptSubtitleStreams.push({ stream, index, needsConversion: false });
       }
     });
 
+    // Handle unknown language subtitle streams - if language is undetectable, keep only the first one
+    if (subtitleCategories.unknown.length > 0) {
+      if (subtitleCategories.unknown.length === 1) {
+        // Only one unknown stream, keep it
+        const { stream, index, codec } = subtitleCategories.unknown[0];
+        if (['ass', 'ssa', 'webvtt', 'mov_text'].includes(codec)) {
+          args.jobLog(`    → Will convert ${codec} to SRT (unknown language)`);
+          subtitleConversions.push({ stream, index, codec });
+          keptSubtitleStreams.push({ stream, index, needsConversion: true });
+        } else if (codec === 'subrip') {
+          args.jobLog(`    → Keeping (already SRT, unknown language)`);
+          keptSubtitleStreams.push({ stream, index, needsConversion: false });
+        } else {
+          args.jobLog(`    → Keeping (${codec}, unknown language)`);
+          keptSubtitleStreams.push({ stream, index, needsConversion: false });
+        }
+      } else {
+        // Multiple unknown streams - keep only the first one
+        const { stream, index, codec } = subtitleCategories.unknown[0];
+        args.jobLog(`⚠️ Multiple unknown subtitle streams detected (${subtitleCategories.unknown.length})`);
+        args.jobLog(`   Language undetectable - keeping only first stream: ${index}`);
+        args.jobLog(`   Skipping ${subtitleCategories.unknown.length - 1} additional unknown subtitle stream(s)`);
+        
+        if (['ass', 'ssa', 'webvtt', 'mov_text'].includes(codec)) {
+          args.jobLog(`    → Will convert ${codec} to SRT (first unknown)`);
+          subtitleConversions.push({ stream, index, codec });
+          keptSubtitleStreams.push({ stream, index, needsConversion: true });
+        } else if (codec === 'subrip') {
+          args.jobLog(`    → Keeping (already SRT, first unknown)`);
+          keptSubtitleStreams.push({ stream, index, needsConversion: false });
+        } else {
+          args.jobLog(`    → Keeping (${codec}, first unknown)`);
+          keptSubtitleStreams.push({ stream, index, needsConversion: false });
+        }
+      }
+    }
+
+    args.jobLog(`Subtitle categorization:`);
+    args.jobLog(`  English: ${subtitleCategories.english.length}`);
+    args.jobLog(`  Unknown: ${subtitleCategories.unknown.length}`);
     args.jobLog(`Keeping ${keptSubtitleStreams.length} subtitle streams`);
     args.jobLog(`Need conversion: ${subtitleConversions.length} streams`);
 
