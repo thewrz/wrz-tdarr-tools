@@ -164,7 +164,7 @@ module.exports = async (args) => {
       args.jobLog(`❌ Failed to analyze source file: ${error.message}`);
       return {
         outputFileObj: args.inputFileObj,
-        outputNumber: 1,
+        outputNumber: 3,
         variables: args.variables,
       };
     }
@@ -742,7 +742,6 @@ module.exports = async (args) => {
     args.jobLog(`  🎯 English content prioritized for maximum compatibility`);
 
     // Signal that file was processed and needs replacement
-    args.infoLog('File was remuxed and requires library replacement');
     args.jobLog('🚨 IMPORTANT: File has been remuxed and MUST replace the original library file');
     args.jobLog('   Subsequent flow plugins should process this file regardless of other conditions');
 
@@ -801,7 +800,7 @@ module.exports = async (args) => {
     // Return original file on failure
     return {
       outputFileObj: args.inputFileObj,
-      outputNumber: 1,
+      outputNumber: 3,
       variables: args.variables,
     };
   }
