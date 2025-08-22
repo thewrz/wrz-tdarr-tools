@@ -981,11 +981,10 @@ module.exports = async (args) => {
       args.jobLog(`   New: ${outputFile}`);
     }
 
-    // CRITICAL FIX: Identify problematic streams that need to be excluded from input analysis
-    // This prevents FFmpeg from analyzing corrupted streams that cause "unspecified size" errors
-    const problematicStreams = [];
+    // IMPROVED: Enhanced stream validation and categorization for better error reporting
+    const streamValidationResults = new Map();
     
-    // Find all subtitle streams that failed validation (these cause muxing errors)
+    // Validate and categorize all streams for better debugging
     subtitleStreams.forEach((stream, index) => {
       const codec = stream.codec_name || '';
       const width = parseInt(stream.width || '0', 10);
@@ -993,23 +992,46 @@ module.exports = async (args) => {
       const frameCount = parseInt(stream.tags?.NUMBER_OF_FRAMES || stream.tags?.['NUMBER_OF_FRAMES-eng'] || '0', 10);
       const byteCount = parseInt(stream.tags?.NUMBER_OF_BYTES || stream.tags?.['NUMBER_OF_BYTES-eng'] || '0', 10);
       
-      // Mark streams that would cause "unspecified size" or muxing errors
-      const isProblematic = (
-        // Bitmap subtitles with unspecified size (the exact error from the log)
-        (['hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle'].includes(codec) && width === 0 && height === 0) ||
-        // Completely empty streams
-        (frameCount === 0 && byteCount === 0) ||
-        // Streams that weren't kept (filtered out by validation)
-        !keptSubtitleStreams.some(kept => kept.stream.index === stream.index)
-      );
+      let validationResult = {
+        isValid: true,
+        reasons: [],
+        streamIndex: stream.index,
+        codec: codec,
+        isKept: keptSubtitleStreams.some(kept => kept.stream.index === stream.index)
+      };
       
-      if (isProblematic) {
-        problematicStreams.push(stream.index);
-        args.jobLog(`  🚫 Marking stream ${stream.index} (${codec}) as problematic - will exclude from input analysis`);
+      // Check for bitmap subtitles with codec parameter issues
+      if (['hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle'].includes(codec)) {
+        if (width === 0 && height === 0) {
+          validationResult.isValid = false;
+          validationResult.reasons.push(`Bitmap subtitle ${codec} has unspecified size (${width}x${height}) - codec parameter issue`);
+        }
+      }
+      
+      // Check for completely empty streams
+      if (frameCount === 0 && byteCount === 0) {
+        validationResult.isValid = false;
+        validationResult.reasons.push(`Stream is completely empty (0 frames, 0 bytes)`);
+      }
+      
+      // Mark streams that weren't kept by our filtering logic
+      if (!validationResult.isKept) {
+        validationResult.reasons.push(`Stream filtered out by validation logic`);
+      }
+      
+      streamValidationResults.set(stream.index, validationResult);
+      
+      // Log validation results for debugging
+      if (!validationResult.isValid) {
+        args.jobLog(`  🚫 Stream ${stream.index} (${codec}) validation issues: ${validationResult.reasons.join(', ')}`);
+      } else if (!validationResult.isKept) {
+        args.jobLog(`  ⚠️ Stream ${stream.index} (${codec}) filtered out but valid: ${validationResult.reasons.join(', ')}`);
+      } else {
+        args.jobLog(`  ✅ Stream ${stream.index} (${codec}) validated and kept`);
       }
     });
     
-    // Build FFmpeg command with enhanced error tolerance and explicit stream exclusion
+    // Build FFmpeg command with enhanced error tolerance and explicit stream mapping
     const ffmpegArgs = [
       // Enhanced input error handling flags - handle corrupted packets and streams gracefully
       '-fflags', '+discardcorrupt+genpts+igndts+flush_packets',
@@ -1024,22 +1046,7 @@ module.exports = async (args) => {
       '-v', 'info',                    // Set verbosity to info level for progress data
     ];
     
-    // CRITICAL FIX: Add input-level stream exclusion to prevent analysis of problematic streams
-    // This prevents FFmpeg from analyzing corrupted streams during the input probe phase
-    if (problematicStreams.length > 0) {
-      args.jobLog(`🔧 CRITICAL FIX: Excluding ${problematicStreams.length} problematic streams from input analysis`);
-      
-      // Method 1: Use -discard to ignore problematic streams at input level
-      problematicStreams.forEach(streamIndex => {
-        ffmpegArgs.push('-discard', `${streamIndex}`);
-      });
-      
-      // Method 2: Add additional input flags to handle codec parameter issues
-      ffmpegArgs.push('-f', 'matroska');  // Force container format to avoid auto-detection issues
-      ffmpegArgs.push('-avoid_negative_ts', 'disabled');  // Disable timestamp adjustment that can cause issues
-    }
-    
-    // Add input file
+    // Add input file (no more problematic discard logic)
     ffmpegArgs.push('-i', sourceFile);
     
     // Add metadata and chapter preservation
