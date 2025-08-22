@@ -505,7 +505,7 @@ module.exports = async (args) => {
       unknown: []
     };
 
-    // Helper function to validate if a subtitle stream contains actual data
+    // Helper function to validate if a subtitle stream contains actual data and has proper codec parameters
     function validateSubtitleStream(stream, index) {
       const codec = stream.codec_name || '';
       const duration = parseFloat(stream.duration) || 0;
@@ -529,6 +529,34 @@ module.exports = async (args) => {
         return false;
       }
       
+      // CRITICAL: Check for streams that will cause "unspecified size" errors in FFmpeg
+      // This is the exact issue from the error log: "Could not find codec parameters for stream 3 (Subtitle: hdmv_pgs_subtitle (pgssub)): unspecified size"
+      if (['hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle'].includes(codec)) {
+        // For bitmap subtitles, missing width/height indicates codec parameter issues
+        if (width === 0 && height === 0) {
+          args.jobLog(`    → Validation FAILED: Bitmap subtitle ${codec} has unspecified size (${width}x${height}) - will cause FFmpeg "unspecified size" error`);
+          return false;
+        }
+        
+        // Additional check: if width OR height is missing (not both zero, but one missing)
+        if ((width === 0 && height > 0) || (width > 0 && height === 0)) {
+          args.jobLog(`    → Validation FAILED: Bitmap subtitle ${codec} has incomplete dimensions (${width}x${height}) - codec parameter issue`);
+          return false;
+        }
+        
+        // Check for unreasonable dimensions that indicate codec issues
+        if (width > 0 && height > 0 && (width > 8192 || height > 8192)) {
+          args.jobLog(`    → Validation FAILED: Bitmap subtitle ${codec} has unreasonable dimensions (${width}x${height}) - likely codec parameter corruption`);
+          return false;
+        }
+        
+        // Check for dimensions that are too small to be valid
+        if (width > 0 && height > 0 && (width < 16 || height < 16)) {
+          args.jobLog(`    → Validation FAILED: Bitmap subtitle ${codec} has suspiciously small dimensions (${width}x${height}) - likely corrupted`);
+          return false;
+        }
+      }
+      
       // CRITICAL: Check for completely empty streams (the exact case from the FFmpeg error)
       // This is the primary issue causing the muxing failure
       if (frameCount === 0 && byteCount === 0 && bitRate === 0) {
@@ -548,17 +576,18 @@ module.exports = async (args) => {
         return false;
       }
       
-      // Enhanced validation: check for any combination of two zero indicators
+      // Enhanced validation: check for any combination of multiple zero indicators
       const zeroIndicators = [
         frameCount === 0,
         byteCount === 0,
         bitRate === 0,
-        duration === 0 && streamDuration === 0
+        duration === 0 && streamDuration === 0,
+        width === 0 && height === 0 && ['hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle'].includes(codec)
       ];
       const zeroCount = zeroIndicators.filter(Boolean).length;
       
       if (zeroCount >= 3) {
-        args.jobLog(`    → Validation FAILED: Stream has ${zeroCount} zero indicators - likely empty/corrupted`);
+        args.jobLog(`    → Validation FAILED: Stream has ${zeroCount} zero/missing indicators - likely empty/corrupted`);
         return false;
       }
       
@@ -576,12 +605,6 @@ module.exports = async (args) => {
           return false;
         }
         
-        // For bitmap subtitles, check for reasonable dimensions
-        if (width === 0 || height === 0) {
-          args.jobLog(`    → Validation WARNING: Bitmap subtitle ${codec} has invalid dimensions (${width}x${height})`);
-          // Don't fail on this alone, but it's suspicious
-        }
-        
         // Additional check for bitmap subtitles with suspiciously low data
         if (byteCount > 0 && byteCount < 1000 && frameCount < 10) {
           args.jobLog(`    → Validation FAILED: Bitmap subtitle ${codec} too small (${byteCount} bytes, ${frameCount} frames) - likely corrupted`);
@@ -592,6 +615,48 @@ module.exports = async (args) => {
         if (bitRate === 0 && frameCount > 0 && byteCount > 0) {
           args.jobLog(`    → Validation WARNING: Bitmap subtitle ${codec} has 0 bitrate but has frames/data - may be metadata issue`);
           // Don't fail on this alone, the stream might still be valid
+        }
+        
+        // CRITICAL: Additional validation using FFprobe to detect codec parameter issues
+        // This catches streams that FFmpeg will report as "unspecified size"
+        try {
+          const probeResult = execFileSync(ffprobePath, [
+            '-v', 'error',
+            '-select_streams', `s:${index}`,
+            '-show_entries', 'stream=width,height,codec_name,codec_parameters',
+            '-of', 'csv=p=0',
+            sourceFile
+          ], { encoding: 'utf8', timeout: 5000 });
+          
+          const probeLines = probeResult.trim().split('\n');
+          if (probeLines.length > 0 && probeLines[0]) {
+            const probeData = probeLines[0].split(',');
+            const probeWidth = parseInt(probeData[0] || '0', 10);
+            const probeHeight = parseInt(probeData[1] || '0', 10);
+            
+            // If FFprobe also reports 0x0 dimensions, this confirms codec parameter issues
+            if (probeWidth === 0 && probeHeight === 0) {
+              args.jobLog(`    → Validation FAILED: FFprobe confirms ${codec} has unspecified size (${probeWidth}x${probeHeight}) - codec parameter issue`);
+              return false;
+            }
+            
+            // Cross-validate dimensions between stream metadata and FFprobe
+            if (width > 0 && height > 0 && (probeWidth !== width || probeHeight !== height)) {
+              args.jobLog(`    → Validation WARNING: Dimension mismatch - stream: ${width}x${height}, FFprobe: ${probeWidth}x${probeHeight}`);
+              // Use FFprobe data as more reliable
+              if (probeWidth === 0 && probeHeight === 0) {
+                args.jobLog(`    → Validation FAILED: FFprobe shows unspecified size despite stream metadata - codec parameter corruption`);
+                return false;
+              }
+            }
+          }
+        } catch (probeError) {
+          args.jobLog(`    → Validation WARNING: Could not probe subtitle stream ${index} - ${probeError.message}`);
+          // If we can't probe the stream, it's likely problematic
+          if (frameCount === 0 || byteCount === 0) {
+            args.jobLog(`    → Validation FAILED: Cannot probe stream and has empty indicators - likely corrupted`);
+            return false;
+          }
         }
       }
       
@@ -628,7 +693,7 @@ module.exports = async (args) => {
         return false;
       }
       
-      args.jobLog(`    → Validation PASSED: ${frameCount} frames, ${byteCount} bytes, ${duration.toFixed(2)}s duration, ${bitRate} bps`);
+      args.jobLog(`    → Validation PASSED: ${frameCount} frames, ${byteCount} bytes, ${duration.toFixed(2)}s duration, ${bitRate} bps, ${width}x${height}`);
       return true;
     }
 
@@ -802,14 +867,19 @@ module.exports = async (args) => {
       args.jobLog(`   New: ${outputFile}`);
     }
 
-    // Build FFmpeg command with error tolerance and timestamp normalization
+    // Build FFmpeg command with enhanced error tolerance and timestamp normalization
     const ffmpegArgs = [
-      // Input error handling flags - handle corrupted packets gracefully
-      '-fflags', '+discardcorrupt+genpts+igndts',
+      // Enhanced input error handling flags - handle corrupted packets and streams gracefully
+      '-fflags', '+discardcorrupt+genpts+igndts+flush_packets',
       '-err_detect', 'ignore_err',
+      '-analyzeduration', '10000000',  // Increase analysis duration for problematic files
+      '-probesize', '10000000',        // Increase probe size for better stream detection
+      '-max_error_rate', '1.0',        // Allow up to 100% error rate (very tolerant)
+      '-ignore_unknown',               // Ignore unknown streams/codecs
       '-i', sourceFile,
       '-map_metadata', '0', // Preserve metadata
-      '-map_chapters', '0'  // Preserve chapters
+      '-map_chapters', '0',  // Preserve chapters
+      '-max_muxing_queue_size', '1024' // Increase muxing queue size for problematic streams (OUTPUT option)
     ];
 
     let outputStreamIndex = 0;
