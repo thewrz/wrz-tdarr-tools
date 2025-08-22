@@ -470,7 +470,25 @@ module.exports = async (args) => {
     // === STEP 5: BUILD FFMPEG COMMAND ===
     args.jobLog('\n━━━ Building FFmpeg Command ━━━');
 
+    // Determine if we need MKV container for compatibility
+    const needsSubtitleConversion = subtitleConversions.length > 0;
+    const needsMKV = isAVI || needsSubtitleConversion;
+    
+    // Force MKV extension if needed for subtitle compatibility
+    let outputFile = workingFile;
+    if (needsMKV && !workingFile.toLowerCase().endsWith('.mkv')) {
+      const baseName = workingFile.replace(/\.[^.]+$/, '');
+      outputFile = baseName + '.mkv';
+      args.jobLog(`⚠️ Container compatibility: Changing output to MKV format`);
+      args.jobLog(`   Original: ${workingFile}`);
+      args.jobLog(`   New: ${outputFile}`);
+    }
+
+    // Build FFmpeg command with error tolerance and timestamp normalization
     const ffmpegArgs = [
+      // Input error handling flags - handle corrupted packets gracefully
+      '-fflags', '+discardcorrupt+genpts+igndts',
+      '-err_detect', 'ignore_err',
       '-i', sourceFile,
       '-map_metadata', '0', // Preserve metadata
       '-map_chapters', '0'  // Preserve chapters
@@ -491,10 +509,16 @@ module.exports = async (args) => {
       outputStreamIndex++;
     }
 
-    // Map audio streams (filtered)
+    // Map audio streams (filtered) - use safer stream mapping
     let audioOutputIndex = 0;
     keptAudioStreams.forEach(({ stream, index }) => {
-      const streamSpec = `0:a:${audioStreams.indexOf(stream)}`;
+      // Use original stream index for safer mapping
+      const audioIndex = audioStreams.findIndex(s => s.index === stream.index);
+      if (audioIndex < 0) {
+        throw new Error(`Internal mapping error: audio stream ${stream.index} not found`);
+      }
+      
+      const streamSpec = `0:a:${audioIndex}`;
       ffmpegArgs.push('-map', streamSpec);
       ffmpegArgs.push(`-c:a:${audioOutputIndex}`, 'copy');
       
@@ -518,10 +542,16 @@ module.exports = async (args) => {
       audioOutputIndex++;
     });
 
-    // Map subtitle streams (filtered and converted)
+    // Map subtitle streams (filtered and converted) - use safer stream mapping
     let subtitleOutputIndex = 0;
     keptSubtitleStreams.forEach(({ stream, index, needsConversion }) => {
-      const streamSpec = `0:s:${subtitleStreams.indexOf(stream)}`;
+      // Use original stream index for safer mapping
+      const subtitleIndex = subtitleStreams.findIndex(s => s.index === stream.index);
+      if (subtitleIndex < 0) {
+        throw new Error(`Internal mapping error: subtitle stream ${stream.index} not found`);
+      }
+      
+      const streamSpec = `0:s:${subtitleIndex}`;
       ffmpegArgs.push('-map', streamSpec);
       
       if (needsConversion) {
@@ -544,8 +574,12 @@ module.exports = async (args) => {
       subtitleOutputIndex++;
     });
 
+    // Add output muxing flags for better error tolerance and timestamp handling
+    ffmpegArgs.push('-avoid_negative_ts', 'make_zero');
+    ffmpegArgs.push('-max_interleave_delta', '0');
+    
     // Add output file and overwrite flag
-    ffmpegArgs.push('-y', workingFile);
+    ffmpegArgs.push('-y', outputFile);
 
     // Additional path validation and debugging
     args.jobLog(`\n━━━ Path Validation ━━━`);
@@ -710,12 +744,12 @@ module.exports = async (args) => {
     // === STEP 7: VERIFY OUTPUT ===
     args.jobLog('\n━━━ Verifying Output ━━━');
 
-    if (!fs.existsSync(workingFile)) {
-      throw new Error('Working file was not created');
+    if (!fs.existsSync(outputFile)) {
+      throw new Error(`Output file was not created: ${outputFile}`);
     }
 
     const sourceStats = fs.statSync(sourceFile);
-    const outputStats = fs.statSync(workingFile);
+    const outputStats = fs.statSync(outputFile);
     
     args.jobLog(`✅ Processing complete:`);
     args.jobLog(`  Source size: ${(sourceStats.size / 1024 / 1024).toFixed(2)} MB`);
@@ -745,19 +779,19 @@ module.exports = async (args) => {
     args.jobLog('🚨 IMPORTANT: File has been remuxed and MUST replace the original library file');
     args.jobLog('   Subsequent flow plugins should process this file regardless of other conditions');
 
-    // Update the input file object to point to the processed working file
-    // CRITICAL: Must return the full path to the working file, not just filename
+    // Update the input file object to point to the processed output file
+    // CRITICAL: Must return the full path to the output file, not just filename
     // Subsequent plugins expect _id to be a valid file path they can access
     // IMPORTANT: Normalize path separators to forward slashes for Tdarr compatibility
     
-    const normalizedWorkingFile = workingFile.replace(/\\/g, '/');
+    const normalizedOutputFile = outputFile.replace(/\\/g, '/');
     
-    args.jobLog(`Returning working file path: ${normalizedWorkingFile}`);
-    args.jobLog(`Working file created at: ${workingFile}`);
+    args.jobLog(`Returning output file path: ${normalizedOutputFile}`);
+    args.jobLog(`Output file created at: ${outputFile}`);
     
     const updatedFileObj = {
       ...args.inputFileObj,
-      _id: normalizedWorkingFile
+      _id: normalizedOutputFile
     };
 
     return {
