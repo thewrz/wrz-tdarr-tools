@@ -273,7 +273,7 @@ module.exports = async (args) => {
       other: []
     };
 
-    // Helper function to validate if an audio stream contains actual data
+    // Helper function to validate if an audio stream contains actual data and can be safely muxed
     function validateAudioStream(stream, index) {
       const codec = stream.codec_name || '';
       const duration = parseFloat(stream.duration) || 0;
@@ -401,6 +401,120 @@ module.exports = async (args) => {
         if (bestBitRate > 0 && bestBitRate < 32000 && duration > 60) {
           args.jobLog(`    → Validation WARNING: Low bitrate (${bestBitRate} bps) for ${codec} codec`);
           // Don't fail on this alone for common codecs, just warn
+        }
+      }
+      
+      // CRITICAL: Enhanced validation using FFprobe to detect muxing-level corruption
+      // This catches streams that will cause "Error submitting a packet to the muxer" errors
+      try {
+        args.jobLog(`    → Running deep FFprobe validation for audio stream ${index}...`);
+        
+        // Test the stream by attempting to read a few packets
+        const deepProbeResult = execFileSync(ffprobePath, [
+          '-v', 'error',
+          '-select_streams', `a:${index}`,
+          '-show_entries', 'packet=pts,dts,size,flags',
+          '-read_intervals', '%+#5',  // Read only first 5 packets for speed
+          '-of', 'csv=p=0',
+          sourceFile
+        ], { encoding: 'utf8', timeout: 10000 });
+        
+        const packets = deepProbeResult.trim().split('\n').filter(line => line.trim());
+        args.jobLog(`    → Deep probe found ${packets.length} packets in first 5 frames`);
+        
+        if (packets.length === 0) {
+          args.jobLog(`    → Validation FAILED: No audio packets found - stream is empty or corrupted`);
+          return false;
+        }
+        
+        // Analyze packet data for corruption indicators
+        let corruptedPackets = 0;
+        let validPackets = 0;
+        
+        packets.forEach((packet, packetIndex) => {
+          const parts = packet.split(',');
+          if (parts.length >= 3) {
+            const pts = parts[0] || 'N/A';
+            const dts = parts[1] || 'N/A';
+            const size = parseInt(parts[2] || '0', 10);
+            
+            // Check for invalid packet sizes
+            if (size === 0) {
+              corruptedPackets++;
+              args.jobLog(`    → Packet ${packetIndex}: size=0 (corrupted)`);
+            } else if (size > 0 && size < 1000000) { // Reasonable size limit
+              validPackets++;
+            } else {
+              corruptedPackets++;
+              args.jobLog(`    → Packet ${packetIndex}: size=${size} (suspicious)`);
+            }
+            
+            // Check for invalid timestamps (both PTS and DTS are N/A)
+            if (pts === 'N/A' && dts === 'N/A') {
+              args.jobLog(`    → Packet ${packetIndex}: missing timestamps (potential corruption)`);
+            }
+          }
+        });
+        
+        // If more than 50% of packets are corrupted, fail validation
+        if (corruptedPackets > validPackets) {
+          args.jobLog(`    → Validation FAILED: ${corruptedPackets}/${packets.length} packets corrupted - stream will cause muxing errors`);
+          return false;
+        }
+        
+        args.jobLog(`    → Deep probe validation: ${validPackets} valid, ${corruptedPackets} corrupted packets`);
+        
+      } catch (deepProbeError) {
+        args.jobLog(`    → Deep probe validation failed: ${deepProbeError.message}`);
+        
+        // If we can't probe the stream at packet level, it's likely corrupted
+        // But only fail if we also have other indicators of corruption
+        if (bestFrameCount === 0 || bestStreamSize === 0) {
+          args.jobLog(`    → Validation FAILED: Cannot probe packets AND stream has empty indicators - likely corrupted`);
+          return false;
+        } else {
+          args.jobLog(`    → Deep probe failed but stream has valid indicators - allowing with warning`);
+        }
+      }
+      
+      // CRITICAL: Additional muxing compatibility test for problematic codecs
+      if (['eac3', 'ac3', 'dts', 'truehd'].includes(codec.toLowerCase())) {
+        try {
+          args.jobLog(`    → Testing muxing compatibility for ${codec} codec...`);
+          
+          // Test if the stream can be copied without errors by doing a very short test mux
+          const testOutputFile = path.join(path.dirname(sourceFile), `test_audio_${index}_${Date.now()}.mkv`);
+          
+          const testResult = execFileSync(ffmpegPath, [
+            '-v', 'error',
+            '-i', sourceFile,
+            '-map', `0:a:${index}`,
+            '-c:a', 'copy',
+            '-t', '1',  // Only process 1 second
+            '-f', 'matroska',
+            '-y', testOutputFile
+          ], { encoding: 'utf8', timeout: 15000 });
+          
+          // Clean up test file
+          if (fs.existsSync(testOutputFile)) {
+            fs.unlinkSync(testOutputFile);
+          }
+          
+          args.jobLog(`    → Muxing compatibility test PASSED for ${codec}`);
+          
+        } catch (muxTestError) {
+          args.jobLog(`    → Muxing compatibility test FAILED for ${codec}: ${muxTestError.message}`);
+          
+          // Check if the error is related to muxing issues that would cause our main problem
+          const errorOutput = muxTestError.stderr || muxTestError.stdout || muxTestError.message || '';
+          if (errorOutput.includes('Error submitting a packet to the muxer') ||
+              errorOutput.includes('Invalid argument') ||
+              errorOutput.includes('Error muxing a packet')) {
+            args.jobLog(`    → Validation FAILED: Stream will cause muxing errors - ${errorOutput.substring(0, 200)}`);
+            return false;
+          } else {
+            args.jobLog(`    → Muxing test failed but not due to packet submission errors - allowing with warning`);
+          }
         }
       }
       
