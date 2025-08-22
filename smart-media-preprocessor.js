@@ -981,7 +981,35 @@ module.exports = async (args) => {
       args.jobLog(`   New: ${outputFile}`);
     }
 
-    // Build FFmpeg command with enhanced error tolerance and timestamp normalization
+    // CRITICAL FIX: Identify problematic streams that need to be excluded from input analysis
+    // This prevents FFmpeg from analyzing corrupted streams that cause "unspecified size" errors
+    const problematicStreams = [];
+    
+    // Find all subtitle streams that failed validation (these cause muxing errors)
+    subtitleStreams.forEach((stream, index) => {
+      const codec = stream.codec_name || '';
+      const width = parseInt(stream.width || '0', 10);
+      const height = parseInt(stream.height || '0', 10);
+      const frameCount = parseInt(stream.tags?.NUMBER_OF_FRAMES || stream.tags?.['NUMBER_OF_FRAMES-eng'] || '0', 10);
+      const byteCount = parseInt(stream.tags?.NUMBER_OF_BYTES || stream.tags?.['NUMBER_OF_BYTES-eng'] || '0', 10);
+      
+      // Mark streams that would cause "unspecified size" or muxing errors
+      const isProblematic = (
+        // Bitmap subtitles with unspecified size (the exact error from the log)
+        (['hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle'].includes(codec) && width === 0 && height === 0) ||
+        // Completely empty streams
+        (frameCount === 0 && byteCount === 0) ||
+        // Streams that weren't kept (filtered out by validation)
+        !keptSubtitleStreams.some(kept => kept.stream.index === stream.index)
+      );
+      
+      if (isProblematic) {
+        problematicStreams.push(stream.index);
+        args.jobLog(`  🚫 Marking stream ${stream.index} (${codec}) as problematic - will exclude from input analysis`);
+      }
+    });
+    
+    // Build FFmpeg command with enhanced error tolerance and explicit stream exclusion
     const ffmpegArgs = [
       // Enhanced input error handling flags - handle corrupted packets and streams gracefully
       '-fflags', '+discardcorrupt+genpts+igndts+flush_packets',
@@ -990,11 +1018,40 @@ module.exports = async (args) => {
       '-probesize', '10000000',        // Increase probe size for better stream detection
       '-max_error_rate', '1.0',        // Allow up to 100% error rate (very tolerant)
       '-ignore_unknown',               // Ignore unknown streams/codecs
-      '-i', sourceFile,
-      '-map_metadata', '0', // Preserve metadata
-      '-map_chapters', '0',  // Preserve chapters
-      '-max_muxing_queue_size', '1024' // Increase muxing queue size for problematic streams (OUTPUT option)
+      // Enhanced progress reporting flags for Tdarr compatibility
+      '-progress', 'pipe:2',           // Send progress to stderr for better parsing
+      '-stats_period', '1',            // Update progress every 1 second
+      '-v', 'info',                    // Set verbosity to info level for progress data
     ];
+    
+    // CRITICAL FIX: Add input-level stream exclusion to prevent analysis of problematic streams
+    // This prevents FFmpeg from analyzing corrupted streams during the input probe phase
+    if (problematicStreams.length > 0) {
+      args.jobLog(`🔧 CRITICAL FIX: Excluding ${problematicStreams.length} problematic streams from input analysis`);
+      
+      // Method 1: Use -discard to ignore problematic streams at input level
+      problematicStreams.forEach(streamIndex => {
+        ffmpegArgs.push('-discard', `${streamIndex}`);
+      });
+      
+      // Method 2: Add additional input flags to handle codec parameter issues
+      ffmpegArgs.push('-f', 'matroska');  // Force container format to avoid auto-detection issues
+      ffmpegArgs.push('-avoid_negative_ts', 'disabled');  // Disable timestamp adjustment that can cause issues
+    }
+    
+    // Add input file
+    ffmpegArgs.push('-i', sourceFile);
+    
+    // Add metadata and chapter preservation
+    ffmpegArgs.push('-map_metadata', '0'); // Preserve metadata
+    ffmpegArgs.push('-map_chapters', '0');  // Preserve chapters
+    ffmpegArgs.push('-max_muxing_queue_size', '1024'); // Increase muxing queue size for problematic streams (OUTPUT option)
+    
+    // CRITICAL FIX: If no subtitles are being kept, explicitly disable subtitle processing
+    if (keptSubtitleStreams.length === 0) {
+      args.jobLog(`🔧 CRITICAL FIX: No compatible subtitles found - explicitly disabling subtitle processing`);
+      ffmpegArgs.push('-sn');  // Disable subtitle streams entirely
+    }
 
     let outputStreamIndex = 0;
 
@@ -1141,40 +1198,103 @@ module.exports = async (args) => {
         const text = data.toString();
         stderrData += text;
         
-        // Extract progress information for time-based progress
-        const progressMatch = text.match(/time=(\d{2}:\d{2}:\d{2}\.\d{2})/);
-        if (progressMatch && progressMatch[1] !== lastProgress) {
-          lastProgress = progressMatch[1];
-          args.jobLog(`Progress: ${lastProgress}`);
+        // Enhanced progress parsing to extract comprehensive FFmpeg statistics
+        // Parse the full FFmpeg progress line: frame=15659 fps=195 q=16.0 size= 239616KiB time=00:10:53.94 bitrate=3001.7kbits/s speed=8.13x
+        const fullProgressMatch = text.match(/frame=\s*(\d+)\s+fps=\s*([\d.]+)\s+q=\s*([\d.-]+)\s+size=\s*(\d+)(\w+)\s+time=(\d{2}:\d{2}:\d{2}\.\d{2})\s+bitrate=\s*([\d.]+)(\w+\/s)\s+speed=\s*([\d.]+)x/);
+        
+        if (fullProgressMatch) {
+          const [, frame, fps, quality, sizeValue, sizeUnit, timeStr, bitrateValue, bitrateUnit, speed] = fullProgressMatch;
           
-          // Report progress to Tdarr server if updateWorker is available
-          if (args.updateWorker) {
-            // Convert time to percentage if we have duration info
-            try {
-              const currentTimeSeconds = timeToSeconds(progressMatch[1]);
-              const inputDuration = args.inputFileObj?.ffProbeData?.format?.duration;
+          // Convert size to consistent units (KiB)
+          let sizeKiB = parseInt(sizeValue, 10);
+          if (sizeUnit.toLowerCase() === 'mib') {
+            sizeKiB = Math.round(sizeKiB * 1024);
+          } else if (sizeUnit.toLowerCase() === 'gib') {
+            sizeKiB = Math.round(sizeKiB * 1024 * 1024);
+          }
+          
+          // Log in Tdarr-compatible format (matches the standard plugin output)
+          const progressLine = `frame=${frame} fps=${fps} q=${quality} size=${sizeKiB}KiB time=${timeStr} bitrate=${bitrateValue}${bitrateUnit} speed=${speed}x`;
+          args.jobLog(progressLine);
+          
+          // Calculate percentage for Tdarr progress tracking
+          try {
+            const currentTimeSeconds = timeToSeconds(timeStr);
+            const inputDuration = args.inputFileObj?.ffProbeData?.format?.duration || 
+                                 parseFloat(mediaInfo?.format?.duration || '0');
+            
+            if (inputDuration && currentTimeSeconds > 0) {
+              const percentage = Math.min(Math.round((currentTimeSeconds / inputDuration) * 100), 100);
               
-              if (inputDuration && currentTimeSeconds > 0) {
-                const percentage = Math.min(Math.round((currentTimeSeconds / inputDuration) * 100), 100);
+              // Update Tdarr worker with comprehensive progress data
+              if (args.updateWorker && (percentage !== lastPercentage || percentage % 5 === 0)) {
+                lastPercentage = percentage;
+                args.updateWorker({
+                  CLIType: ffmpegPath,
+                  preset: ffmpegArgs.join(' '),
+                  percentage: percentage,
+                  frame: parseInt(frame, 10),
+                  fps: parseFloat(fps),
+                  speed: parseFloat(speed),
+                  bitrate: `${bitrateValue}${bitrateUnit}`,
+                  time: timeStr,
+                  size: `${sizeKiB}KiB`
+                });
                 
-                // Only update if percentage changed significantly (avoid spam)
-                if (percentage !== lastPercentage && percentage % 5 === 0) {
-                  lastPercentage = percentage;
-                  args.updateWorker({
-                    CLIType: ffmpegPath,
-                    preset: ffmpegArgs.join(' '),
-                    percentage: percentage,
-                  });
-                  args.jobLog(`Re-muxing progress: ${percentage}%`);
-                }
+                // Log percentage in the same format as the example
+                args.jobLog(`Re-muxing progress: ${percentage}%`);
               }
-            } catch (error) {
-              // Fallback to basic progress reporting without percentage
+            }
+          } catch (error) {
+            // Fallback to basic progress reporting
+            if (args.updateWorker) {
               args.updateWorker({
                 CLIType: ffmpegPath,
                 preset: ffmpegArgs.join(' '),
-                progress: lastProgress,
+                progress: timeStr,
+                frame: parseInt(frame, 10),
+                fps: parseFloat(fps),
+                speed: parseFloat(speed)
               });
+            }
+          }
+          
+          lastProgress = timeStr;
+        } else {
+          // Fallback: Extract basic time-based progress if full progress line not found
+          const basicProgressMatch = text.match(/time=(\d{2}:\d{2}:\d{2}\.\d{2})/);
+          if (basicProgressMatch && basicProgressMatch[1] !== lastProgress) {
+            lastProgress = basicProgressMatch[1];
+            args.jobLog(`Progress: ${lastProgress}`);
+            
+            // Report basic progress to Tdarr server
+            if (args.updateWorker) {
+              try {
+                const currentTimeSeconds = timeToSeconds(basicProgressMatch[1]);
+                const inputDuration = args.inputFileObj?.ffProbeData?.format?.duration || 
+                                     parseFloat(mediaInfo?.format?.duration || '0');
+                
+                if (inputDuration && currentTimeSeconds > 0) {
+                  const percentage = Math.min(Math.round((currentTimeSeconds / inputDuration) * 100), 100);
+                  
+                  if (percentage !== lastPercentage && percentage % 5 === 0) {
+                    lastPercentage = percentage;
+                    args.updateWorker({
+                      CLIType: ffmpegPath,
+                      preset: ffmpegArgs.join(' '),
+                      percentage: percentage,
+                      time: lastProgress
+                    });
+                    args.jobLog(`Re-muxing progress: ${percentage}%`);
+                  }
+                }
+              } catch (error) {
+                args.updateWorker({
+                  CLIType: ffmpegPath,
+                  preset: ffmpegArgs.join(' '),
+                  progress: lastProgress,
+                });
+              }
             }
           }
         }
