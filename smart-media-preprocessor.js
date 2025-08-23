@@ -1,6 +1,626 @@
 // Smart Media Preprocessor
 // Single-stage preprocessing for problematic media files before standard Tdarr transcoding
 // Handles: language detection from titles, subtitle conversion, stream filtering, compatibility optimization
+
+// === MODULE-LEVEL CONSTANTS ===
+const VERBOSE = false; // Global logging flag
+
+// Enhanced language detection patterns
+const languagePatterns = {
+  eng: [
+    /\benglish\b/i, /\beng\b/i, /\ben\b/i, /\ben[-_]us\b/i, /\ben[-_]gb\b/i,
+    /\ben[-_]au\b/i, /\ben[-_]ca\b/i, /\benglish\s+audio\b/i
+  ],
+  jpn: [
+    /\bjapanese\b/i, /\bjpn\b/i, /\bja\b/i, /\bja[-_]jp\b/i,
+    /\bnihongo\b/i, /\b日本語\b/i, /\bjapanese\s+audio\b/i
+  ],
+  kor: [
+    /\bkorean\b/i, /\bkor\b/i, /\bko\b/i, /\bko[-_]kr\b/i,
+    /\bhangul\b/i, /\b한국어\b/i, /\bkorean\s+audio\b/i
+  ],
+  fre: [
+    /\bfrench\b/i, /\bfre\b/i, /\bfr\b/i, /\bfr[-_]fr\b/i,
+    /\bfrancais\b/i, /\bfrançais\b/i, /\bfrench\s+audio\b/i
+  ]
+};
+
+// Commentary detection patterns
+const commentaryPatterns = [
+  /commentary/i, /director.?s?\s+commentary/i, /cast\s+commentary/i,
+  /production.*commentary/i, /design.*commentary/i, /audio\s+commentary/i,
+  /filmmaker.*commentary/i, /writer.*commentary/i, /producer.*commentary/i,
+  /behind.*scenes/i, /making.*of/i, /^commentary$/i, /\bcomm\b/i,
+  /director.*track/i, /bonus.*audio/i, /audio\s+description/i,
+  /descriptive\s+audio/i, /described\s+video/i, /\bad\b/i,
+  /vision.*impaired/i, /accessibility/i
+];
+
+// === HELPER FUNCTIONS ===
+
+/**
+ * Converts time string (HH:MM:SS.SS) to seconds
+ * @param {string} timeString - Time string in HH:MM:SS.SS format
+ * @returns {number} Time in seconds
+ */
+function timeToSeconds(timeString) {
+  const parts = timeString.split(':');
+  const hours = parseInt(parts[0], 10);
+  const minutes = parseInt(parts[1], 10);
+  const seconds = parseFloat(parts[2]);
+  return hours * 3600 + minutes * 60 + seconds;
+}
+
+/**
+ * Detects language from stream metadata using title and language tags
+ * @param {Object} stream - FFprobe stream object
+ * @returns {string} Detected language code or 'commentary' or 'unknown'
+ */
+function detectLanguage(stream) {
+  const title = (stream.tags?.title || '').toLowerCase();
+  const language = (stream.tags?.language || '').toLowerCase();
+  
+  // Check for commentary first (highest priority)
+  const textToCheck = `${title} ${language}`.trim();
+  if (commentaryPatterns.some(pattern => pattern.test(textToCheck))) {
+    return 'commentary';
+  }
+
+  // Check if language tag is already a known ISO code (second priority)
+  if (['eng', 'en', 'english'].includes(language)) return 'eng';
+  if (['jpn', 'ja', 'japanese'].includes(language)) return 'jpn';
+  if (['kor', 'ko', 'korean'].includes(language)) return 'kor';
+  if (['fre', 'fr', 'french', 'fra'].includes(language)) return 'fre';
+
+  // Check title for language patterns (third priority - more thorough)
+  for (const [langCode, patterns] of Object.entries(languagePatterns)) {
+    // Check title first (more specific)
+    if (title && patterns.some(pattern => pattern.test(title))) {
+      return langCode;
+    }
+  }
+
+  // Check combined text as fallback (fourth priority)
+  for (const [langCode, patterns] of Object.entries(languagePatterns)) {
+    if (patterns.some(pattern => pattern.test(textToCheck))) {
+      return langCode;
+    }
+  }
+
+  // If we still can't detect, check for common language indicators in title
+  if (title) {
+    // Additional title-based detection for edge cases
+    if (/\b(dub|dubbed)\b/i.test(title) && !/\b(sub|subtitle)\b/i.test(title)) {
+      // If it says "dub" but no specific language, assume English dub
+      return 'eng';
+    }
+    if (/\b(original|org)\b/i.test(title)) {
+      // Original audio - could be any language, but often Japanese for anime
+      // We'll still mark as unknown to let other logic handle it
+    }
+  }
+
+  return 'unknown';
+}
+
+/* 
+ * Validates if an audio stream contains actual data and can be safely muxed
+ * @param {Object} stream - FFprobe stream object
+ * @param {number} index - Stream index
+ * @param {Object} args - Tdarr plugin arguments object
+ * @param {string} sourceFile - Path to source file for deep validation
+ * @param {string} ffprobePath - Path to ffprobe executable
+ * @param {string} ffmpegPath - Path to ffmpeg executable
+ * @returns {boolean} True if stream is valid, false otherwise
+ */
+function validateAudioStream(stream, index, args, sourceFile, ffprobePath, ffmpegPath) {
+  const codec = stream.codec_name || '';
+  const duration = parseFloat(stream.duration) || 0;
+  const tags = stream.tags || {};
+  
+  // Get audio properties from multiple sources for cross-validation
+  const streamBitRate = parseInt(stream.bit_rate || '0', 10);
+  const tagBitRate = parseInt(tags.BPS || tags['BPS-eng'] || '0', 10);
+  const sampleRate = parseInt(stream.sample_rate || '0', 10);
+  const channels = parseInt(stream.channels || '0', 10);
+  
+  // Extract frame and byte counts from tags
+  const frameCount = parseInt(tags.NUMBER_OF_FRAMES || tags['NUMBER_OF_FRAMES-eng'] || '0', 10);
+  const byteCount = parseInt(tags.NUMBER_OF_BYTES || tags['NUMBER_OF_BYTES-eng'] || '0', 10);
+  
+  // Cross-reference with MediaInfo data if available
+  let mediaInfoAudio = null;
+  if (args.inputFileObj?.mediaInfo?.track) {
+    // Find corresponding audio track in MediaInfo (by stream order)
+    const audioTracks = args.inputFileObj.mediaInfo.track.filter(t => t['@type'] === 'Audio');
+    if (audioTracks[index]) {
+      mediaInfoAudio = audioTracks[index];
+    }
+  }
+  
+  // Get MediaInfo properties for cross-validation
+  let mediaInfoBitRate = 0;
+  let mediaInfoSampleRate = 0;
+  let mediaInfoChannels = 0;
+  let mediaInfoStreamSize = 0;
+  let mediaInfoFrameCount = 0;
+  
+  if (mediaInfoAudio) {
+    mediaInfoBitRate = parseInt(mediaInfoAudio.BitRate || '0', 10);
+    mediaInfoSampleRate = parseInt(mediaInfoAudio.SamplingRate || '0', 10);
+    mediaInfoChannels = parseInt(mediaInfoAudio.Channels || '0', 10);
+    mediaInfoStreamSize = parseInt(mediaInfoAudio.StreamSize || '0', 10);
+    mediaInfoFrameCount = parseInt(mediaInfoAudio.FrameCount || '0', 10);
+  }
+  
+  // Use the best available bitrate (prefer stream, then MediaInfo, then tags)
+  const bestBitRate = streamBitRate > 0 ? streamBitRate : 
+                     mediaInfoBitRate > 0 ? mediaInfoBitRate : 
+                     tagBitRate;
+  
+  // Use the best available sample rate
+  const bestSampleRate = sampleRate > 0 ? sampleRate : mediaInfoSampleRate;
+  
+  // Use the best available channel count
+  const bestChannels = channels > 0 ? channels : mediaInfoChannels;
+  
+  // Use the best available stream size (prefer MediaInfo, then tags)
+  const bestStreamSize = mediaInfoStreamSize > 0 ? mediaInfoStreamSize : byteCount;
+  
+  // Use the best available frame count (prefer MediaInfo, then tags)
+  const bestFrameCount = mediaInfoFrameCount > 0 ? mediaInfoFrameCount : frameCount;
+  
+  if (VERBOSE) {
+    args.jobLog(`    → Audio validation data:`);
+    args.jobLog(`      FFprobe: ${streamBitRate} bps, ${sampleRate} Hz, ${channels} ch, ${frameCount} frames, ${byteCount} bytes`);
+    if (mediaInfoAudio) {
+      args.jobLog(`      MediaInfo: ${mediaInfoBitRate} bps, ${mediaInfoSampleRate} Hz, ${mediaInfoChannels} ch, ${mediaInfoFrameCount} frames, ${mediaInfoStreamSize} bytes`);
+    }
+    args.jobLog(`      Best values: ${bestBitRate} bps, ${bestSampleRate} Hz, ${bestChannels} ch, ${bestFrameCount} frames, ${bestStreamSize} bytes`);
+  }
+  
+  // Check for missing essential stream properties first
+  if (!stream.codec_name || stream.codec_name.trim() === '') {
+    args.jobLog(`    → Validation FAILED: Audio stream missing codec information`);
+    return false;
+  }
+  
+  // Check for invalid channel count (must have at least 1 channel)
+  if (bestChannels === 0) {
+    args.jobLog(`    → Validation FAILED: Audio stream has 0 channels`);
+    return false;
+  }
+  
+  // Check for unreasonable channel counts (more than 32 channels is suspicious)
+  if (bestChannels > 32) {
+    args.jobLog(`    → Validation FAILED: Audio stream has unreasonable channel count (${bestChannels})`);
+    return false;
+  }
+  
+  // Check for invalid sample rates
+  if (bestSampleRate > 0 && (bestSampleRate < 8000 || bestSampleRate > 192000)) {
+    args.jobLog(`    → Validation FAILED: Audio stream has invalid sample rate (${bestSampleRate} Hz)`);
+    return false;
+  }
+  
+  // Check for completely empty streams (all indicators are zero)
+  if (bestFrameCount === 0 && bestStreamSize === 0 && bestBitRate === 0) {
+    args.jobLog(`    → Validation FAILED: Audio stream is completely empty (0 frames, 0 bytes, 0 bitrate)`);
+    return false;
+  }
+  
+  // Check for streams with zero duration AND zero frames (but be more lenient with cross-validation)
+  if (duration === 0 && bestFrameCount === 0 && bestStreamSize === 0) {
+    args.jobLog(`    → Validation FAILED: Audio stream has 0 duration, 0 frames, and 0 bytes`);
+    return false;
+  }
+  
+  // Check for suspiciously small audio streams (but only if we have reliable data)
+  if (bestStreamSize > 0 && bestStreamSize < 1000 && bestFrameCount === 0 && duration > 10) {
+    args.jobLog(`    → Validation FAILED: Audio stream too small (${bestStreamSize} bytes, 0 frames) for ${duration.toFixed(2)}s duration - likely corrupted`);
+    return false;
+  }
+  
+  // Validate bitrate reasonableness (if we have duration and size)
+  if (duration > 0 && bestStreamSize > 0) {
+    const calculatedBitRate = Math.round((bestStreamSize * 8) / duration);
+    const reportedBitRate = bestBitRate;
+    
+    // Allow for some variance in bitrate calculations (±50% tolerance)
+    if (reportedBitRate > 0 && calculatedBitRate > 0) {
+      const variance = Math.abs(calculatedBitRate - reportedBitRate) / reportedBitRate;
+      if (variance > 0.5 && reportedBitRate < 1000) {
+        if (VERBOSE) {
+          args.jobLog(`    → Validation WARNING: Large bitrate variance (calculated: ${calculatedBitRate}, reported: ${reportedBitRate})`);
+        }
+        // Don't fail on this alone, just warn
+      }
+    }
+  }
+  
+  // Additional validation for specific codecs
+  if (['mp3', 'aac', 'ac3', 'eac3', 'dts', 'flac', 'pcm'].includes(codec.toLowerCase())) {
+    // For common audio codecs, we expect reasonable bitrates
+    if (bestBitRate > 0 && bestBitRate < 32000 && duration > 60) {
+      if (VERBOSE) {
+        args.jobLog(`    → Validation WARNING: Low bitrate (${bestBitRate} bps) for ${codec} codec`);
+      }
+      // Don't fail on this alone for common codecs, just warn
+    }
+  }
+  
+  // CRITICAL: Enhanced validation using FFprobe to detect muxing-level corruption
+  // This catches streams that will cause "Error submitting a packet to the muxer" errors
+  try {
+    if (VERBOSE) {
+      args.jobLog(`    → Running deep FFprobe validation for audio stream ${index}...`);
+    }
+    
+    // Test the stream by attempting to read a few packets
+    const { execFileSync } = require('child_process');
+    const deepProbeResult = execFileSync(ffprobePath, [
+      '-v', 'error',
+      '-select_streams', `a:${index}`,
+      '-show_entries', 'packet=pts,dts,size,flags',
+      '-read_intervals', '%+#5',  // Read only first 5 packets for speed
+      '-of', 'csv=p=0',
+      sourceFile
+    ], { encoding: 'utf8', timeout: 10000 });
+    
+    const packets = deepProbeResult.trim().split('\n').filter(line => line.trim());
+    if (VERBOSE) {
+      args.jobLog(`    → Deep probe found ${packets.length} packets in first 5 frames`);
+    }
+    
+    if (packets.length === 0) {
+      args.jobLog(`    → Validation FAILED: No audio packets found - stream is empty or corrupted`);
+      return false;
+    }
+    
+    // Analyze packet data for corruption indicators
+    let corruptedPackets = 0;
+    let validPackets = 0;
+    
+    packets.forEach((packet, packetIndex) => {
+      const parts = packet.split(',');
+      if (parts.length >= 3) {
+        const pts = parts[0] || 'N/A';
+        const dts = parts[1] || 'N/A';
+        const size = parseInt(parts[2] || '0', 10);
+        
+        // Check for invalid packet sizes
+        if (size === 0) {
+          corruptedPackets++;
+          if (VERBOSE) {
+            args.jobLog(`    → Packet ${packetIndex}: size=0 (corrupted)`);
+          }
+        } else if (size > 0 && size < 1000000) { // Reasonable size limit
+          validPackets++;
+        } else {
+          corruptedPackets++;
+          if (VERBOSE) {
+            args.jobLog(`    → Packet ${packetIndex}: size=${size} (suspicious)`);
+          }
+        }
+        
+        // Check for invalid timestamps (both PTS and DTS are N/A)
+        if (pts === 'N/A' && dts === 'N/A') {
+          if (VERBOSE) {
+            args.jobLog(`    → Packet ${packetIndex}: missing timestamps (potential corruption)`);
+          }
+        }
+      }
+    });
+    
+    // If more than 50% of packets are corrupted, fail validation
+    if (corruptedPackets > validPackets) {
+      args.jobLog(`    → Validation FAILED: ${corruptedPackets}/${packets.length} packets corrupted - stream will cause muxing errors`);
+      return false;
+    }
+    
+    if (VERBOSE) {
+      args.jobLog(`    → Deep probe validation: ${validPackets} valid, ${corruptedPackets} corrupted packets`);
+    }
+    
+  } catch (deepProbeError) {
+    if (VERBOSE) {
+      args.jobLog(`    → Deep probe validation failed: ${deepProbeError.message}`);
+    }
+    
+    // If we can't probe the stream at packet level, it's likely corrupted
+    // But only fail if we also have other indicators of corruption
+    if (bestFrameCount === 0 || bestStreamSize === 0) {
+      args.jobLog(`    → Validation FAILED: Cannot probe packets AND stream has empty indicators - likely corrupted`);
+      return false;
+    } else {
+      if (VERBOSE) {
+        args.jobLog(`    → Deep probe failed but stream has valid indicators - allowing with warning`);
+      }
+    }
+  }
+  
+  // CRITICAL: Additional muxing compatibility test for problematic codecs
+  if (['eac3', 'ac3', 'dts', 'truehd'].includes(codec.toLowerCase())) {
+    try {
+      if (VERBOSE) {
+        args.jobLog(`    → Testing muxing compatibility for ${codec} codec...`);
+      }
+      
+      // Test if the stream can be copied without errors by doing a very short test mux
+      const path = require('path');
+      const fs = require('fs');
+      const testOutputFile = path.join(path.dirname(sourceFile), `test_audio_${index}_${Date.now()}.mkv`);
+      
+      const { execFileSync } = require('child_process');
+      const testResult = execFileSync(ffmpegPath, [
+        '-v', 'error',
+        '-i', sourceFile,
+        '-map', `0:a:${index}`,
+        '-c:a', 'copy',
+        '-t', '1',  // Only process 1 second
+        '-f', 'matroska',
+        '-y', testOutputFile
+      ], { encoding: 'utf8', timeout: 15000 });
+      
+      // Clean up test file
+      if (fs.existsSync(testOutputFile)) {
+        fs.unlinkSync(testOutputFile);
+      }
+      
+      if (VERBOSE) {
+        args.jobLog(`    → Muxing compatibility test PASSED for ${codec}`);
+      }
+      
+    } catch (muxTestError) {
+      if (VERBOSE) {
+        args.jobLog(`    → Muxing compatibility test FAILED for ${codec}: ${muxTestError.message}`);
+      }
+      
+      // Check if the error is related to muxing issues that would cause our main problem
+      const errorOutput = muxTestError.stderr || muxTestError.stdout || muxTestError.message || '';
+      if (errorOutput.includes('Error submitting a packet to the muxer') ||
+          errorOutput.includes('Invalid argument') ||
+          errorOutput.includes('Error muxing a packet')) {
+        args.jobLog(`    → Validation FAILED: Stream will cause muxing errors - ${errorOutput.substring(0, 200)}`);
+        return false;
+      } else {
+        if (VERBOSE) {
+          args.jobLog(`    → Muxing test failed but not due to packet submission errors - allowing with warning`);
+        }
+      }
+    }
+  }
+  
+  // Final validation: if we have MediaInfo data that contradicts FFprobe significantly, prefer MediaInfo
+  if (mediaInfoAudio && bestStreamSize === 0 && mediaInfoStreamSize > 0) {
+    if (VERBOSE) {
+      args.jobLog(`    → Validation NOTE: Using MediaInfo data over FFprobe (MediaInfo shows ${mediaInfoStreamSize} bytes)`);
+    }
+  }
+  
+  if (VERBOSE) {
+    args.jobLog(`    → Validation PASSED: ${bestFrameCount} frames, ${bestStreamSize} bytes, ${bestBitRate} bps, ${bestChannels} ch, ${bestSampleRate} Hz`);
+  }
+  return true;
+}
+
+/**
+ * Validates if a subtitle stream contains actual data and has proper codec parameters
+ * @param {Object} stream - FFprobe stream object
+ * @param {number} index - Stream index
+ * @param {Object} args - Tdarr plugin arguments object
+ * @param {string} sourceFile - Path to source file for deep validation
+ * @param {string} ffprobePath - Path to ffprobe executable
+ * @returns {boolean} True if stream is valid, false otherwise
+ */
+function validateSubtitleStream(stream, index, args, sourceFile, ffprobePath) {
+  const codec = stream.codec_name || '';
+  const duration = parseFloat(stream.duration) || 0;
+  const tags = stream.tags || {};
+  
+  // Extract frame and byte counts from tags (common in many containers)
+  const frameCount = parseInt(tags.NUMBER_OF_FRAMES || tags['NUMBER_OF_FRAMES-eng'] || '0', 10);
+  const byteCount = parseInt(tags.NUMBER_OF_BYTES || tags['NUMBER_OF_BYTES-eng'] || '0', 10);
+  const bitRate = parseInt(tags.BPS || tags['BPS-eng'] || stream.bit_rate || '0', 10);
+  
+  // Get additional stream properties for comprehensive validation
+  const streamDuration = parseFloat(tags.DURATION || tags['DURATION-eng'] || '0');
+  const width = parseInt(stream.width || '0', 10);
+  const height = parseInt(stream.height || '0', 10);
+  
+  if (VERBOSE) {
+    args.jobLog(`    → Subtitle validation data: ${frameCount} frames, ${byteCount} bytes, ${bitRate} bps, ${duration.toFixed(2)}s duration, ${width}x${height}`);
+  }
+  
+  // Check for missing essential stream properties first
+  if (!stream.codec_name || stream.codec_name.trim() === '') {
+    args.jobLog(`    → Validation FAILED: Stream missing codec information`);
+    return false;
+  }
+  
+  // CRITICAL: Check for streams that will cause "unspecified size" errors in FFmpeg
+  // This is the exact issue from the error log: "Could not find codec parameters for stream 3 (Subtitle: hdmv_pgs_subtitle (pgssub)): unspecified size"
+  if (['hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle'].includes(codec)) {
+    // For bitmap subtitles, missing width/height indicates codec parameter issues
+    if (width === 0 && height === 0) {
+      args.jobLog(`    → Validation FAILED: Bitmap subtitle ${codec} has unspecified size (${width}x${height}) - will cause FFmpeg "unspecified size" error`);
+      return false;
+    }
+    
+    // Additional check: if width OR height is missing (not both zero, but one missing)
+    if ((width === 0 && height > 0) || (width > 0 && height === 0)) {
+      args.jobLog(`    → Validation FAILED: Bitmap subtitle ${codec} has incomplete dimensions (${width}x${height}) - codec parameter issue`);
+      return false;
+    }
+    
+    // Check for unreasonable dimensions that indicate codec issues
+    if (width > 0 && height > 0 && (width > 8192 || height > 8192)) {
+      args.jobLog(`    → Validation FAILED: Bitmap subtitle ${codec} has unreasonable dimensions (${width}x${height}) - likely codec parameter corruption`);
+      return false;
+    }
+    
+    // Check for dimensions that are too small to be valid
+    if (width > 0 && height > 0 && (width < 16 || height < 16)) {
+      args.jobLog(`    → Validation FAILED: Bitmap subtitle ${codec} has suspiciously small dimensions (${width}x${height}) - likely corrupted`);
+      return false;
+    }
+  }
+  
+  // CRITICAL: Check for completely empty streams (the exact case from the FFmpeg error)
+  // This is the primary issue causing the muxing failure
+  if (frameCount === 0 && byteCount === 0 && bitRate === 0) {
+    args.jobLog(`    → Validation FAILED: Stream is completely empty (0 frames, 0 bytes, 0 bitrate) - will cause FFmpeg muxing error`);
+    return false;
+  }
+  
+  // Additional critical check: streams with zero duration in tags but non-zero stream duration
+  if (streamDuration === 0 && frameCount === 0 && byteCount === 0) {
+    args.jobLog(`    → Validation FAILED: Stream has 0 tag duration, 0 frames, and 0 bytes - empty stream`);
+    return false;
+  }
+  
+  // Check for streams with zero duration AND zero frames (another indicator of empty streams)
+  if (duration === 0 && frameCount === 0 && byteCount === 0) {
+    args.jobLog(`    → Validation FAILED: Stream has 0 duration, 0 frames, and 0 bytes`);
+    return false;
+  }
+  
+  // Enhanced validation: check for any combination of multiple zero indicators
+  const zeroIndicators = [
+    frameCount === 0,
+    byteCount === 0,
+    bitRate === 0,
+    duration === 0 && streamDuration === 0,
+    width === 0 && height === 0 && ['hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle'].includes(codec)
+  ];
+  const zeroCount = zeroIndicators.filter(Boolean).length;
+  
+  if (zeroCount >= 3) {
+    args.jobLog(`    → Validation FAILED: Stream has ${zeroCount} zero/missing indicators - likely empty/corrupted`);
+    return false;
+  }
+  
+  // Specific validation for bitmap subtitles (the problematic type in the log)
+  if (['hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle'].includes(codec)) {
+    // For bitmap subtitles, we absolutely need frame data
+    if (frameCount === 0) {
+      args.jobLog(`    → Validation FAILED: Bitmap subtitle ${codec} has no frames - will cause muxing issues`);
+      return false;
+    }
+    
+    // For bitmap subtitles, we also need actual data
+    if (byteCount === 0) {
+      args.jobLog(`    → Validation FAILED: Bitmap subtitle ${codec} has no data (0 bytes) - empty stream`);
+      return false;
+    }
+    
+    // Additional check for bitmap subtitles with suspiciously low data
+    if (byteCount > 0 && byteCount < 1000 && frameCount < 10) {
+      args.jobLog(`    → Validation FAILED: Bitmap subtitle ${codec} too small (${byteCount} bytes, ${frameCount} frames) - likely corrupted`);
+      return false;
+    }
+    
+    // Check for bitmap subtitles with zero bitrate (common issue)
+    if (bitRate === 0 && frameCount > 0 && byteCount > 0) {
+      if (VERBOSE) {
+        args.jobLog(`    → Validation WARNING: Bitmap subtitle ${codec} has 0 bitrate but has frames/data - may be metadata issue`);
+      }
+      // Don't fail on this alone, the stream might still be valid
+    }
+    
+    // CRITICAL: Additional validation using FFprobe to detect codec parameter issues
+    // This catches streams that FFmpeg will report as "unspecified size"
+    try {
+      const { execFileSync } = require('child_process');
+      const probeResult = execFileSync(ffprobePath, [
+        '-v', 'error',
+        '-select_streams', `s:${index}`,
+        '-show_entries', 'stream=width,height,codec_name,codec_parameters',
+        '-of', 'csv=p=0',
+        sourceFile
+      ], { encoding: 'utf8', timeout: 5000 });
+      
+      const probeLines = probeResult.trim().split('\n');
+      if (probeLines.length > 0 && probeLines[0]) {
+        const probeData = probeLines[0].split(',');
+        const probeWidth = parseInt(probeData[0] || '0', 10);
+        const probeHeight = parseInt(probeData[1] || '0', 10);
+        
+        // CRITICAL FIX: Check for NaN values from FFprobe parsing issues
+        if (Number.isNaN(probeWidth) || Number.isNaN(probeHeight)) {
+          args.jobLog(`    → Validation FAILED: FFprobe returned invalid dimensions for ${codec} (width=${probeWidth}, height=${probeHeight}) - codec parameter corruption`);
+          return false;
+        }
+        
+        // If FFprobe also reports 0x0 dimensions, this confirms codec parameter issues
+        if (probeWidth === 0 && probeHeight === 0) {
+          args.jobLog(`    → Validation FAILED: FFprobe confirms ${codec} has unspecified size (${probeWidth}x${probeHeight}) - codec parameter issue`);
+          return false;
+        }
+        
+        // Cross-validate dimensions between stream metadata and FFprobe
+        if (width > 0 && height > 0 && (probeWidth !== width || probeHeight !== height)) {
+          if (VERBOSE) {
+            args.jobLog(`    → Validation WARNING: Dimension mismatch - stream: ${width}x${height}, FFprobe: ${probeWidth}x${probeHeight}`);
+          }
+          // Use FFprobe data as more reliable
+          if (probeWidth === 0 && probeHeight === 0) {
+            args.jobLog(`    → Validation FAILED: FFprobe shows unspecified size despite stream metadata - codec parameter corruption`);
+            return false;
+          }
+        }
+      }
+    } catch (probeError) {
+      if (VERBOSE) {
+        args.jobLog(`    → Validation WARNING: Could not probe subtitle stream ${index} - ${probeError.message}`);
+      }
+      // If we can't probe the stream, it's likely problematic
+      if (frameCount === 0 || byteCount === 0) {
+        args.jobLog(`    → Validation FAILED: Cannot probe stream and has empty indicators - likely corrupted`);
+        return false;
+      }
+    }
+  }
+  
+  // For text-based subtitles, check if we have reasonable data
+  if (['subrip', 'ass', 'ssa', 'webvtt', 'mov_text'].includes(codec)) {
+    if (byteCount > 0 && byteCount < 50) {
+      args.jobLog(`    → Validation FAILED: Text subtitle too small (${byteCount} bytes) - likely empty`);
+      return false;
+    }
+    
+    // Text subtitles should have some content
+    if (frameCount === 0 && byteCount === 0) {
+      args.jobLog(`    → Validation FAILED: Text subtitle has no frames and no data`);
+      return false;
+    }
+  }
+  
+  // Check for suspiciously small streams (likely corrupted)
+  if (byteCount > 0 && byteCount < 100 && frameCount === 0) {
+    args.jobLog(`    → Validation FAILED: Stream too small (${byteCount} bytes, 0 frames) - likely corrupted`);
+    return false;
+  }
+  
+  // Additional check for streams that report duration but have no actual content
+  if ((duration > 0 || streamDuration > 0) && frameCount === 0 && byteCount === 0) {
+    args.jobLog(`    → Validation FAILED: Stream reports duration but has no content (0 frames, 0 bytes)`);
+    return false;
+  }
+  
+  // Final safety check: if stream has a start time but no content, it's likely empty
+  const startTime = parseFloat(stream.start_time || '0');
+  if (startTime >= 0 && frameCount === 0 && byteCount === 0 && bitRate === 0) {
+    args.jobLog(`    → Validation FAILED: Stream has start time but no content - empty placeholder stream`);
+    return false;
+  }
+  
+  if (VERBOSE) {
+    args.jobLog(`    → Validation PASSED: ${frameCount} frames, ${byteCount} bytes, ${duration.toFixed(2)}s duration, ${bitRate} bps, ${width}x${height}`);
+  }
+  return true;
+}
+
 module.exports = async (args) => {
   const fs = require('fs');
   const path = require('path');
@@ -184,84 +804,6 @@ module.exports = async (args) => {
     // === STEP 2: ANALYZE AUDIO STREAMS ===
     args.jobLog('\n━━━ Analyzing Audio Streams ━━━');
 
-    // Enhanced language detection patterns
-    const languagePatterns = {
-      eng: [
-        /\benglish\b/i, /\beng\b/i, /\ben\b/i, /\ben[-_]us\b/i, /\ben[-_]gb\b/i,
-        /\ben[-_]au\b/i, /\ben[-_]ca\b/i, /\benglish\s+audio\b/i
-      ],
-      jpn: [
-        /\bjapanese\b/i, /\bjpn\b/i, /\bja\b/i, /\bja[-_]jp\b/i,
-        /\bnihongo\b/i, /\b日本語\b/i, /\bjapanese\s+audio\b/i
-      ],
-      kor: [
-        /\bkorean\b/i, /\bkor\b/i, /\bko\b/i, /\bko[-_]kr\b/i,
-        /\bhangul\b/i, /\b한국어\b/i, /\bkorean\s+audio\b/i
-      ],
-      fre: [
-        /\bfrench\b/i, /\bfre\b/i, /\bfr\b/i, /\bfr[-_]fr\b/i,
-        /\bfrancais\b/i, /\bfrançais\b/i, /\bfrench\s+audio\b/i
-      ]
-    };
-
-    // Commentary detection patterns
-    const commentaryPatterns = [
-      /commentary/i, /director.?s?\s+commentary/i, /cast\s+commentary/i,
-      /production.*commentary/i, /design.*commentary/i, /audio\s+commentary/i,
-      /filmmaker.*commentary/i, /writer.*commentary/i, /producer.*commentary/i,
-      /behind.*scenes/i, /making.*of/i, /^commentary$/i, /\bcomm\b/i,
-      /director.*track/i, /bonus.*audio/i, /audio\s+description/i,
-      /descriptive\s+audio/i, /described\s+video/i, /\bad\b/i,
-      /vision.*impaired/i, /accessibility/i
-    ];
-
-    function detectLanguage(stream) {
-      const title = (stream.tags?.title || '').toLowerCase();
-      const language = (stream.tags?.language || '').toLowerCase();
-      
-      // Check for commentary first (highest priority)
-      const textToCheck = `${title} ${language}`.trim();
-      if (commentaryPatterns.some(pattern => pattern.test(textToCheck))) {
-        return 'commentary';
-      }
-
-      // Check if language tag is already a known ISO code (second priority)
-      if (['eng', 'en', 'english'].includes(language)) return 'eng';
-      if (['jpn', 'ja', 'japanese'].includes(language)) return 'jpn';
-      if (['kor', 'ko', 'korean'].includes(language)) return 'kor';
-      if (['fre', 'fr', 'french', 'fra'].includes(language)) return 'fre';
-
-      // Check title for language patterns (third priority - more thorough)
-      for (const [langCode, patterns] of Object.entries(languagePatterns)) {
-        // Check title first (more specific)
-        if (title && patterns.some(pattern => pattern.test(title))) {
-          return langCode;
-        }
-      }
-
-      // Check combined text as fallback (fourth priority)
-      for (const [langCode, patterns] of Object.entries(languagePatterns)) {
-        if (patterns.some(pattern => pattern.test(textToCheck))) {
-          return langCode;
-        }
-      }
-
-      // If we still can't detect, check for common language indicators in title
-      if (title) {
-        // Additional title-based detection for edge cases
-        if (/\b(dub|dubbed)\b/i.test(title) && !/\b(sub|subtitle)\b/i.test(title)) {
-          // If it says "dub" but no specific language, assume English dub
-          return 'eng';
-        }
-        if (/\b(original|org)\b/i.test(title)) {
-          // Original audio - could be any language, but often Japanese for anime
-          // We'll still mark as unknown to let other logic handle it
-        }
-      }
-
-      return 'unknown';
-    }
-
     // Categorize audio streams
     const audioCategories = {
       english: [],
@@ -273,260 +815,6 @@ module.exports = async (args) => {
       other: []
     };
 
-    // Helper function to validate if an audio stream contains actual data and can be safely muxed
-    function validateAudioStream(stream, index) {
-      const codec = stream.codec_name || '';
-      const duration = parseFloat(stream.duration) || 0;
-      const tags = stream.tags || {};
-      
-      // Get audio properties from multiple sources for cross-validation
-      const streamBitRate = parseInt(stream.bit_rate || '0', 10);
-      const tagBitRate = parseInt(tags.BPS || tags['BPS-eng'] || '0', 10);
-      const sampleRate = parseInt(stream.sample_rate || '0', 10);
-      const channels = parseInt(stream.channels || '0', 10);
-      
-      // Extract frame and byte counts from tags
-      const frameCount = parseInt(tags.NUMBER_OF_FRAMES || tags['NUMBER_OF_FRAMES-eng'] || '0', 10);
-      const byteCount = parseInt(tags.NUMBER_OF_BYTES || tags['NUMBER_OF_BYTES-eng'] || '0', 10);
-      
-      // Cross-reference with MediaInfo data if available
-      let mediaInfoAudio = null;
-      if (args.inputFileObj?.mediaInfo?.track) {
-        // Find corresponding audio track in MediaInfo (by stream order)
-        const audioTracks = args.inputFileObj.mediaInfo.track.filter(t => t['@type'] === 'Audio');
-        if (audioTracks[index]) {
-          mediaInfoAudio = audioTracks[index];
-        }
-      }
-      
-      // Get MediaInfo properties for cross-validation
-      let mediaInfoBitRate = 0;
-      let mediaInfoSampleRate = 0;
-      let mediaInfoChannels = 0;
-      let mediaInfoStreamSize = 0;
-      let mediaInfoFrameCount = 0;
-      
-      if (mediaInfoAudio) {
-        mediaInfoBitRate = parseInt(mediaInfoAudio.BitRate || '0', 10);
-        mediaInfoSampleRate = parseInt(mediaInfoAudio.SamplingRate || '0', 10);
-        mediaInfoChannels = parseInt(mediaInfoAudio.Channels || '0', 10);
-        mediaInfoStreamSize = parseInt(mediaInfoAudio.StreamSize || '0', 10);
-        mediaInfoFrameCount = parseInt(mediaInfoAudio.FrameCount || '0', 10);
-      }
-      
-      // Use the best available bitrate (prefer stream, then MediaInfo, then tags)
-      const bestBitRate = streamBitRate > 0 ? streamBitRate : 
-                         mediaInfoBitRate > 0 ? mediaInfoBitRate : 
-                         tagBitRate;
-      
-      // Use the best available sample rate
-      const bestSampleRate = sampleRate > 0 ? sampleRate : mediaInfoSampleRate;
-      
-      // Use the best available channel count
-      const bestChannels = channels > 0 ? channels : mediaInfoChannels;
-      
-      // Use the best available stream size (prefer MediaInfo, then tags)
-      const bestStreamSize = mediaInfoStreamSize > 0 ? mediaInfoStreamSize : byteCount;
-      
-      // Use the best available frame count (prefer MediaInfo, then tags)
-      const bestFrameCount = mediaInfoFrameCount > 0 ? mediaInfoFrameCount : frameCount;
-      
-      args.jobLog(`    → Audio validation data:`);
-      args.jobLog(`      FFprobe: ${streamBitRate} bps, ${sampleRate} Hz, ${channels} ch, ${frameCount} frames, ${byteCount} bytes`);
-      if (mediaInfoAudio) {
-        args.jobLog(`      MediaInfo: ${mediaInfoBitRate} bps, ${mediaInfoSampleRate} Hz, ${mediaInfoChannels} ch, ${mediaInfoFrameCount} frames, ${mediaInfoStreamSize} bytes`);
-      }
-      args.jobLog(`      Best values: ${bestBitRate} bps, ${bestSampleRate} Hz, ${bestChannels} ch, ${bestFrameCount} frames, ${bestStreamSize} bytes`);
-      
-      // Check for missing essential stream properties first
-      if (!stream.codec_name || stream.codec_name.trim() === '') {
-        args.jobLog(`    → Validation FAILED: Audio stream missing codec information`);
-        return false;
-      }
-      
-      // Check for invalid channel count (must have at least 1 channel)
-      if (bestChannels === 0) {
-        args.jobLog(`    → Validation FAILED: Audio stream has 0 channels`);
-        return false;
-      }
-      
-      // Check for unreasonable channel counts (more than 32 channels is suspicious)
-      if (bestChannels > 32) {
-        args.jobLog(`    → Validation FAILED: Audio stream has unreasonable channel count (${bestChannels})`);
-        return false;
-      }
-      
-      // Check for invalid sample rates
-      if (bestSampleRate > 0 && (bestSampleRate < 8000 || bestSampleRate > 192000)) {
-        args.jobLog(`    → Validation FAILED: Audio stream has invalid sample rate (${bestSampleRate} Hz)`);
-        return false;
-      }
-      
-      // Check for completely empty streams (all indicators are zero)
-      if (bestFrameCount === 0 && bestStreamSize === 0 && bestBitRate === 0) {
-        args.jobLog(`    → Validation FAILED: Audio stream is completely empty (0 frames, 0 bytes, 0 bitrate)`);
-        return false;
-      }
-      
-      // Check for streams with zero duration AND zero frames (but be more lenient with cross-validation)
-      if (duration === 0 && bestFrameCount === 0 && bestStreamSize === 0) {
-        args.jobLog(`    → Validation FAILED: Audio stream has 0 duration, 0 frames, and 0 bytes`);
-        return false;
-      }
-      
-      // Check for suspiciously small audio streams (but only if we have reliable data)
-      if (bestStreamSize > 0 && bestStreamSize < 1000 && bestFrameCount === 0 && duration > 10) {
-        args.jobLog(`    → Validation FAILED: Audio stream too small (${bestStreamSize} bytes, 0 frames) for ${duration.toFixed(2)}s duration - likely corrupted`);
-        return false;
-      }
-      
-      // Validate bitrate reasonableness (if we have duration and size)
-      if (duration > 0 && bestStreamSize > 0) {
-        const calculatedBitRate = Math.round((bestStreamSize * 8) / duration);
-        const reportedBitRate = bestBitRate;
-        
-        // Allow for some variance in bitrate calculations (±50% tolerance)
-        if (reportedBitRate > 0 && calculatedBitRate > 0) {
-          const variance = Math.abs(calculatedBitRate - reportedBitRate) / reportedBitRate;
-          if (variance > 0.5 && reportedBitRate < 1000) {
-            args.jobLog(`    → Validation WARNING: Large bitrate variance (calculated: ${calculatedBitRate}, reported: ${reportedBitRate})`);
-            // Don't fail on this alone, just warn
-          }
-        }
-      }
-      
-      // Additional validation for specific codecs
-      if (['mp3', 'aac', 'ac3', 'eac3', 'dts', 'flac', 'pcm'].includes(codec.toLowerCase())) {
-        // For common audio codecs, we expect reasonable bitrates
-        if (bestBitRate > 0 && bestBitRate < 32000 && duration > 60) {
-          args.jobLog(`    → Validation WARNING: Low bitrate (${bestBitRate} bps) for ${codec} codec`);
-          // Don't fail on this alone for common codecs, just warn
-        }
-      }
-      
-      // CRITICAL: Enhanced validation using FFprobe to detect muxing-level corruption
-      // This catches streams that will cause "Error submitting a packet to the muxer" errors
-      try {
-        args.jobLog(`    → Running deep FFprobe validation for audio stream ${index}...`);
-        
-        // Test the stream by attempting to read a few packets
-        const deepProbeResult = execFileSync(ffprobePath, [
-          '-v', 'error',
-          '-select_streams', `a:${index}`,
-          '-show_entries', 'packet=pts,dts,size,flags',
-          '-read_intervals', '%+#5',  // Read only first 5 packets for speed
-          '-of', 'csv=p=0',
-          sourceFile
-        ], { encoding: 'utf8', timeout: 10000 });
-        
-        const packets = deepProbeResult.trim().split('\n').filter(line => line.trim());
-        args.jobLog(`    → Deep probe found ${packets.length} packets in first 5 frames`);
-        
-        if (packets.length === 0) {
-          args.jobLog(`    → Validation FAILED: No audio packets found - stream is empty or corrupted`);
-          return false;
-        }
-        
-        // Analyze packet data for corruption indicators
-        let corruptedPackets = 0;
-        let validPackets = 0;
-        
-        packets.forEach((packet, packetIndex) => {
-          const parts = packet.split(',');
-          if (parts.length >= 3) {
-            const pts = parts[0] || 'N/A';
-            const dts = parts[1] || 'N/A';
-            const size = parseInt(parts[2] || '0', 10);
-            
-            // Check for invalid packet sizes
-            if (size === 0) {
-              corruptedPackets++;
-              args.jobLog(`    → Packet ${packetIndex}: size=0 (corrupted)`);
-            } else if (size > 0 && size < 1000000) { // Reasonable size limit
-              validPackets++;
-            } else {
-              corruptedPackets++;
-              args.jobLog(`    → Packet ${packetIndex}: size=${size} (suspicious)`);
-            }
-            
-            // Check for invalid timestamps (both PTS and DTS are N/A)
-            if (pts === 'N/A' && dts === 'N/A') {
-              args.jobLog(`    → Packet ${packetIndex}: missing timestamps (potential corruption)`);
-            }
-          }
-        });
-        
-        // If more than 50% of packets are corrupted, fail validation
-        if (corruptedPackets > validPackets) {
-          args.jobLog(`    → Validation FAILED: ${corruptedPackets}/${packets.length} packets corrupted - stream will cause muxing errors`);
-          return false;
-        }
-        
-        args.jobLog(`    → Deep probe validation: ${validPackets} valid, ${corruptedPackets} corrupted packets`);
-        
-      } catch (deepProbeError) {
-        args.jobLog(`    → Deep probe validation failed: ${deepProbeError.message}`);
-        
-        // If we can't probe the stream at packet level, it's likely corrupted
-        // But only fail if we also have other indicators of corruption
-        if (bestFrameCount === 0 || bestStreamSize === 0) {
-          args.jobLog(`    → Validation FAILED: Cannot probe packets AND stream has empty indicators - likely corrupted`);
-          return false;
-        } else {
-          args.jobLog(`    → Deep probe failed but stream has valid indicators - allowing with warning`);
-        }
-      }
-      
-      // CRITICAL: Additional muxing compatibility test for problematic codecs
-      if (['eac3', 'ac3', 'dts', 'truehd'].includes(codec.toLowerCase())) {
-        try {
-          args.jobLog(`    → Testing muxing compatibility for ${codec} codec...`);
-          
-          // Test if the stream can be copied without errors by doing a very short test mux
-          const testOutputFile = path.join(path.dirname(sourceFile), `test_audio_${index}_${Date.now()}.mkv`);
-          
-          const testResult = execFileSync(ffmpegPath, [
-            '-v', 'error',
-            '-i', sourceFile,
-            '-map', `0:a:${index}`,
-            '-c:a', 'copy',
-            '-t', '1',  // Only process 1 second
-            '-f', 'matroska',
-            '-y', testOutputFile
-          ], { encoding: 'utf8', timeout: 15000 });
-          
-          // Clean up test file
-          if (fs.existsSync(testOutputFile)) {
-            fs.unlinkSync(testOutputFile);
-          }
-          
-          args.jobLog(`    → Muxing compatibility test PASSED for ${codec}`);
-          
-        } catch (muxTestError) {
-          args.jobLog(`    → Muxing compatibility test FAILED for ${codec}: ${muxTestError.message}`);
-          
-          // Check if the error is related to muxing issues that would cause our main problem
-          const errorOutput = muxTestError.stderr || muxTestError.stdout || muxTestError.message || '';
-          if (errorOutput.includes('Error submitting a packet to the muxer') ||
-              errorOutput.includes('Invalid argument') ||
-              errorOutput.includes('Error muxing a packet')) {
-            args.jobLog(`    → Validation FAILED: Stream will cause muxing errors - ${errorOutput.substring(0, 200)}`);
-            return false;
-          } else {
-            args.jobLog(`    → Muxing test failed but not due to packet submission errors - allowing with warning`);
-          }
-        }
-      }
-      
-      // Final validation: if we have MediaInfo data that contradicts FFprobe significantly, prefer MediaInfo
-      if (mediaInfoAudio && bestStreamSize === 0 && mediaInfoStreamSize > 0) {
-        args.jobLog(`    → Validation NOTE: Using MediaInfo data over FFprobe (MediaInfo shows ${mediaInfoStreamSize} bytes)`);
-      }
-      
-      args.jobLog(`    → Validation PASSED: ${bestFrameCount} frames, ${bestStreamSize} bytes, ${bestBitRate} bps, ${bestChannels} ch, ${bestSampleRate} Hz`);
-      return true;
-    }
-
     audioStreams.forEach((stream, index) => {
       const detectedLang = detectLanguage(stream);
       const title = stream.tags?.title || '';
@@ -535,7 +823,7 @@ module.exports = async (args) => {
       args.jobLog(`  Stream ${index}: "${title}" (${language}) → ${detectedLang}`);
       
       // Validate that the audio stream contains actual data
-      if (!validateAudioStream(stream, index)) {
+      if (!validateAudioStream(stream, index, args, sourceFile, ffprobePath, ffmpegPath)) {
         args.jobLog(`    → Skipping (failed validation - empty or corrupted audio stream)`);
         return;
       }
@@ -825,7 +1113,7 @@ module.exports = async (args) => {
       args.jobLog(`  Stream ${index}: "${stream.tags?.title || ''}" (${language}, ${codec})`);
 
       // First, validate that the stream contains actual data
-      if (!validateSubtitleStream(stream, index)) {
+      if (!validateSubtitleStream(stream, index, args, sourceFile, ffprobePath)) {
         args.jobLog(`    → Skipping (failed validation - empty or corrupted stream)`);
         return;
       }
