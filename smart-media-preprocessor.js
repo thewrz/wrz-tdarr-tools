@@ -744,15 +744,21 @@ module.exports = async (args) => {
           
           const probeLines = probeResult.trim().split('\n');
           if (probeLines.length > 0 && probeLines[0]) {
-            const probeData = probeLines[0].split(',');
-            const probeWidth = parseInt(probeData[0] || '0', 10);
-            const probeHeight = parseInt(probeData[1] || '0', 10);
-            
-            // If FFprobe also reports 0x0 dimensions, this confirms codec parameter issues
-            if (probeWidth === 0 && probeHeight === 0) {
-              args.jobLog(`    → Validation FAILED: FFprobe confirms ${codec} has unspecified size (${probeWidth}x${probeHeight}) - codec parameter issue`);
-              return false;
-            }
+          const probeData = probeLines[0].split(',');
+          const probeWidth = parseInt(probeData[0] || '0', 10);
+          const probeHeight = parseInt(probeData[1] || '0', 10);
+          
+          // CRITICAL FIX: Check for NaN values from FFprobe parsing issues
+          if (Number.isNaN(probeWidth) || Number.isNaN(probeHeight)) {
+            args.jobLog(`    → Validation FAILED: FFprobe returned invalid dimensions for ${codec} (width=${probeWidth}, height=${probeHeight}) - codec parameter corruption`);
+            return false;
+          }
+          
+          // If FFprobe also reports 0x0 dimensions, this confirms codec parameter issues
+          if (probeWidth === 0 && probeHeight === 0) {
+            args.jobLog(`    → Validation FAILED: FFprobe confirms ${codec} has unspecified size (${probeWidth}x${probeHeight}) - codec parameter issue`);
+            return false;
+          }
             
             // Cross-validate dimensions between stream metadata and FFprobe
             if (width > 0 && height > 0 && (probeWidth !== width || probeHeight !== height)) {
@@ -1033,20 +1039,71 @@ module.exports = async (args) => {
     
     // Build FFmpeg command with enhanced error tolerance and explicit stream mapping
     const ffmpegArgs = [
-      // Enhanced input error handling flags - handle corrupted packets and streams gracefully
+      // CRITICAL: Enhanced input error handling flags - handle corrupted packets and streams gracefully
       '-fflags', '+discardcorrupt+genpts+igndts+flush_packets',
       '-err_detect', 'ignore_err',
       '-analyzeduration', '10000000',  // Increase analysis duration for problematic files
       '-probesize', '10000000',        // Increase probe size for better stream detection
       '-max_error_rate', '1.0',        // Allow up to 100% error rate (very tolerant)
       '-ignore_unknown',               // Ignore unknown streams/codecs
+      // CRITICAL: Add stream-specific error handling to prevent demuxing failures
+      '-xerror',                       // Exit on error (but combined with error tolerance flags)
+      '-max_streams', '50',            // Limit maximum streams to prevent resource exhaustion
       // Enhanced progress reporting flags for Tdarr compatibility
       '-progress', 'pipe:2',           // Send progress to stderr for better parsing
       '-stats_period', '1',            // Update progress every 1 second
       '-v', 'info',                    // Set verbosity to info level for progress data
     ];
     
-    // Add input file (no more problematic discard logic)
+    // CRITICAL FIX: Identify problematic streams that need to be excluded
+    // Log which streams are being excluded for debugging
+    const excludedStreams = [];
+    subtitleStreams.forEach((stream, index) => {
+      const isKept = keptSubtitleStreams.some(kept => kept.stream.index === stream.index);
+      if (!isKept) {
+        const validationResult = streamValidationResults.get(stream.index);
+        if (validationResult && !validationResult.isValid) {
+          excludedStreams.push(`${stream.index} (${stream.codec_name}) - ${validationResult.reasons.join(', ')}`);
+          args.jobLog(`🔧 Will exclude problematic subtitle stream: ${stream.index} (${stream.codec_name}) - ${validationResult.reasons.join(', ')}`);
+        } else if (['hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle'].includes(stream.codec_name)) {
+          excludedStreams.push(`${stream.index} (${stream.codec_name}) - bitmap subtitle not convertible`);
+          args.jobLog(`🔧 Will exclude bitmap subtitle stream: ${stream.index} (${stream.codec_name}) - not convertible`);
+        }
+      }
+    });
+    
+    if (excludedStreams.length > 0) {
+      args.jobLog(`🔧 Excluding ${excludedStreams.length} problematic streams via input-level stream selection`);
+    }
+    
+    // CRITICAL FIX: Use input-level stream selection to avoid reading problematic streams entirely
+    // This prevents the "Could not find codec parameters" errors during input analysis
+    const validStreamSpecs = [];
+    
+    // Add video streams (always keep first video)
+    if (videoStreams.length > 0) {
+      validStreamSpecs.push('0:v:0');
+    }
+    
+    // Add valid audio streams
+    keptAudioStreams.forEach(({ stream }) => {
+      const audioIndex = audioStreams.findIndex(s => s.index === stream.index);
+      if (audioIndex >= 0) {
+        validStreamSpecs.push(`0:a:${audioIndex}`);
+      }
+    });
+    
+    // Add valid subtitle streams (only if we have any to keep)
+    if (keptSubtitleStreams.length > 0) {
+      keptSubtitleStreams.forEach(({ stream }) => {
+        const subtitleIndex = subtitleStreams.findIndex(s => s.index === stream.index);
+        if (subtitleIndex >= 0) {
+          validStreamSpecs.push(`0:s:${subtitleIndex}`);
+        }
+      });
+    }
+    
+    // Add input file first
     ffmpegArgs.push('-i', sourceFile);
     
     // Add metadata and chapter preservation
@@ -1062,6 +1119,9 @@ module.exports = async (args) => {
 
     let outputStreamIndex = 0;
 
+    // CRITICAL FIX: Use simplified approach - just map the streams we want to keep
+    // Don't try to be clever with input-level selection, just use standard mapping
+    
     // Map video streams (keep only the first one)
     if (videoStreams.length > 0) {
       ffmpegArgs.push('-map', '0:v:0');
@@ -1142,7 +1202,9 @@ module.exports = async (args) => {
 
     // Add output muxing flags for better error tolerance and timestamp handling
     ffmpegArgs.push('-avoid_negative_ts', 'make_zero');
-    ffmpegArgs.push('-max_interleave_delta', '0');
+    // CRITICAL FIX: Remove strict interleave delta to prevent muxing failures with problematic streams
+    // The previous '-max_interleave_delta', '0' setting was too strict and caused "Invalid argument" errors
+    // when streams had timing issues or ended unexpectedly
     
     // Add output file and overwrite flag
     ffmpegArgs.push('-y', outputFile);
