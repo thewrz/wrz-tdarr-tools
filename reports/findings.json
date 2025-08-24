@@ -1,0 +1,79 @@
+{
+  "libSum": {
+    "nb_streams": 14,
+    "duration": 2855.316,
+    "bit_rate": 2562196,
+    "size": 914484977,
+    "format_name": "matroska,webm",
+    "writing_app": "Lavf59.27.100",
+    "video": {
+      "codec_name": "hevc",
+      "profile": "Main",
+      "pix_fmt": "yuv420p",
+      "width": 1920,
+      "height": 1080,
+      "r_frame_rate": "24000/1001",
+      "start_time": 0.005
+    },
+    "audio": {
+      "codec_name": "eac3",
+      "channels": 6,
+      "layout": "5.1(side)",
+      "bit_rate": 640000,
+      "start_time": 0
+    },
+    "subs": [
+      "hdmv_pgs_subtitle:dan",
+      "hdmv_pgs_subtitle:dut",
+      "hdmv_pgs_subtitle:eng",
+      "hdmv_pgs_subtitle:fin",
+      "hdmv_pgs_subtitle:fre",
+      "hdmv_pgs_subtitle:fre",
+      "hdmv_pgs_subtitle:ice",
+      "hdmv_pgs_subtitle:nor",
+      "hdmv_pgs_subtitle:por",
+      "hdmv_pgs_subtitle:spa",
+      "hdmv_pgs_subtitle:spa",
+      "hdmv_pgs_subtitle:swe"
+    ]
+  },
+  "cacheSum": {
+    "nb_streams": 2,
+    "duration": 2855.393,
+    "bit_rate": 2265662,
+    "size": 808669628,
+    "format_name": "matroska,webm",
+    "writing_app": "Lavf61.7.100",
+    "video": {
+      "codec_name": "hevc",
+      "profile": "Main",
+      "pix_fmt": "yuv420p",
+      "width": 1920,
+      "height": 1080,
+      "r_frame_rate": "24000/1001",
+      "start_time": 0.083
+    },
+    "audio": {
+      "codec_name": "eac3",
+      "channels": 6,
+      "layout": "5.1(side)",
+      "bit_rate": 640000,
+      "start_time": 0.078
+    },
+    "subs": []
+  },
+  "diffs": {
+    "streams_delta": -12,
+    "duration_delta": 0.07700000000022555,
+    "bitrate_delta": -296534,
+    "size_delta": -105815349,
+    "video_start_shift_ms": 78,
+    "audio_start_shift_ms": 78,
+    "subs_removed": 12
+  },
+  "failure": {
+    "kind": "io-path",
+    "note": "Path/filename translation issue."
+  },
+  "hitsCount": 5
+}

@@ -38,7 +38,7 @@ const commentaryPatterns = [
 
 // === HELPER FUNCTIONS ===
 
-/**
+/*
  * Converts time string (HH:MM:SS.SS) to seconds
  * @param {string} timeString - Time string in HH:MM:SS.SS format
  * @returns {number} Time in seconds
@@ -51,7 +51,223 @@ function timeToSeconds(timeString) {
   return hours * 3600 + minutes * 60 + seconds;
 }
 
-/**
+/*
+ * Detects A/V desync by analyzing start times of video and audio streams
+ * @param {Array} videoStreams - Array of video stream objects
+ * @param {Array} audioStreams - Array of audio stream objects with cached language data
+ * @param {Object} args - Tdarr plugin arguments object
+ * @returns {Object} Desync analysis results with offset recommendations
+ */
+function analyzeAVDesync(videoStreams, audioStreams, args) {
+  if (VERBOSE) {
+    args.jobLog('🔍 Analyzing A/V desync...');
+  }
+
+  // Get primary video stream (first video stream)
+  const primaryVideo = videoStreams[0];
+  if (!primaryVideo) {
+    return { needsOffset: false, reason: 'No video stream found' };
+  }
+
+  const videoStartTime = parseFloat(primaryVideo.start_time || '0');
+  
+  if (VERBOSE) {
+    args.jobLog(`  Primary video start_time: ${videoStartTime}s`);
+  }
+
+  // Analyze each audio stream for desync
+  const desyncResults = [];
+  
+  audioStreams.forEach(({ stream, index, lang }) => {
+    const audioStartTime = parseFloat(stream.start_time || '0');
+    const desyncOffset = videoStartTime - audioStartTime;
+    
+    desyncResults.push({
+      streamIndex: index,
+      audioStartTime,
+      desyncOffset,
+      language: lang || 'unknown'
+    });
+    
+    if (VERBOSE) {
+      args.jobLog(`  Audio stream ${index} (${lang || 'unknown'}): start_time=${audioStartTime}s, offset=${desyncOffset.toFixed(3)}s`);
+    }
+  });
+
+  // Determine if offset correction is needed
+  const DESYNC_THRESHOLD_MS = 40; // Default threshold: 40ms
+  const maxAbsOffset = Math.max(...desyncResults.map(r => Math.abs(r.desyncOffset)));
+  const maxAbsOffsetMs = maxAbsOffset * 1000;
+  
+  const needsOffset = maxAbsOffsetMs >= DESYNC_THRESHOLD_MS;
+  
+  if (VERBOSE) {
+    args.jobLog(`  Maximum absolute offset: ${maxAbsOffsetMs.toFixed(1)}ms`);
+    args.jobLog(`  Threshold: ${DESYNC_THRESHOLD_MS}ms`);
+    args.jobLog(`  Needs offset correction: ${needsOffset ? 'YES' : 'NO'}`);
+  }
+
+  return {
+    needsOffset,
+    videoStartTime,
+    desyncResults,
+    maxAbsOffsetMs,
+    threshold: DESYNC_THRESHOLD_MS,
+    reason: needsOffset ? 
+      `Max offset ${maxAbsOffsetMs.toFixed(1)}ms exceeds ${DESYNC_THRESHOLD_MS}ms threshold` :
+      `Max offset ${maxAbsOffsetMs.toFixed(1)}ms within ${DESYNC_THRESHOLD_MS}ms threshold`
+  };
+}
+
+/*
+ * Builds FFmpeg command with -itsoffset correction for A/V desync
+ * @param {string} sourceFile - Path to source file
+ * @param {string} outputFile - Path to output file
+ * @param {Array} videoStreams - Array of video stream objects
+ * @param {Array} keptAudioStreams - Array of kept audio stream objects with language data
+ * @param {Array} keptSubtitleStreams - Array of kept subtitle stream objects
+ * @param {Object} desyncAnalysis - Desync analysis results
+ * @param {Object} args - Tdarr plugin arguments object
+ * @returns {Array} FFmpeg arguments array
+ */
+function buildDesyncCorrectedFFmpegArgs(sourceFile, outputFile, videoStreams, keptAudioStreams, keptSubtitleStreams, desyncAnalysis, args) {
+  const ffmpegArgs = [
+    // Enhanced input error handling flags
+    '-fflags', '+discardcorrupt+genpts+igndts+flush_packets',
+    '-err_detect', 'ignore_err',
+    '-analyzeduration', '10000000',
+    '-probesize', '10000000',
+    '-max_error_rate', '1.0',
+    '-ignore_unknown',
+    '-xerror',
+    '-max_streams', '50',
+    '-progress', 'pipe:2',
+    '-stats_period', '1',
+    '-v', 'info'
+  ];
+
+  args.jobLog('🔧 Building split-input FFmpeg command with -itsoffset correction');
+
+  // Create a map of audio stream offsets for easy lookup
+  const audioOffsetMap = new Map();
+  desyncAnalysis.desyncResults.forEach(result => {
+    audioOffsetMap.set(result.streamIndex, result.desyncOffset);
+  });
+
+  // Add video input (no offset needed)
+  ffmpegArgs.push('-i', sourceFile);
+  args.jobLog(`  Input 0: ${sourceFile} (video + subtitles, no offset)`);
+
+  // Add audio inputs with -itsoffset correction
+  let inputIndex = 1;
+  const audioInputMap = new Map(); // Maps original audio stream index to input index
+  
+  keptAudioStreams.forEach(({ stream, index }) => {
+    const offset = audioOffsetMap.get(index) || 0;
+    
+    if (Math.abs(offset) >= 0.001) { // Only apply offset if significant (>= 1ms)
+      ffmpegArgs.push('-itsoffset', offset.toFixed(3));
+      args.jobLog(`  Input ${inputIndex}: ${sourceFile} (audio stream ${index}, offset: ${offset.toFixed(3)}s)`);
+    } else {
+      args.jobLog(`  Input ${inputIndex}: ${sourceFile} (audio stream ${index}, no offset needed)`);
+    }
+    
+    ffmpegArgs.push('-i', sourceFile);
+    audioInputMap.set(index, inputIndex);
+    inputIndex++;
+  });
+
+  // Add metadata and chapter preservation
+  ffmpegArgs.push('-map_metadata', '0');
+  ffmpegArgs.push('-map_chapters', '0');
+  ffmpegArgs.push('-max_muxing_queue_size', '1024');
+
+  // Disable subtitles if none are kept
+  if (keptSubtitleStreams.length === 0) {
+    ffmpegArgs.push('-sn');
+  }
+
+  // Map video stream from input 0
+  if (videoStreams.length > 0) {
+    ffmpegArgs.push('-map', '0:v:0');
+    ffmpegArgs.push('-c:v:0', 'copy');
+    args.jobLog(`  Video mapping: 0:v:0 → output video:0 (copy)`);
+  }
+
+  // Map audio streams from their respective inputs
+  let audioOutputIndex = 0;
+  keptAudioStreams.forEach(({ stream, index }) => {
+    const inputIdx = audioInputMap.get(index);
+    const audioStreamIndex = 0; // Always 0 since each input contains all streams but we select specific ones
+    
+    // Find the audio stream index within the source file
+    const sourceAudioStreams = args.inputFileObj?.ffProbeData?.streams?.filter(s => s.codec_type === 'audio') || [];
+    const sourceAudioIndex = sourceAudioStreams.findIndex(s => s.index === index);
+    
+    if (sourceAudioIndex >= 0) {
+      ffmpegArgs.push('-map', `${inputIdx}:a:${sourceAudioIndex}`);
+      ffmpegArgs.push(`-c:a:${audioOutputIndex}`, 'copy');
+      
+      // Set language metadata
+      const detectedLang = detectLanguage(stream);
+      const langCode = detectedLang === 'eng' ? 'eng' :
+                      detectedLang === 'jpn' ? 'jpn' :
+                      detectedLang === 'kor' ? 'kor' :
+                      detectedLang === 'fre' ? 'fre' : 'und';
+      
+      ffmpegArgs.push(`-metadata:s:a:${audioOutputIndex}`, `language=${langCode}`);
+      
+      // Set first English stream as default
+      if (audioOutputIndex === 0 && detectedLang === 'eng') {
+        ffmpegArgs.push(`-disposition:a:${audioOutputIndex}`, 'default');
+      } else {
+        ffmpegArgs.push(`-disposition:a:${audioOutputIndex}`, '0');
+      }
+      
+      const offset = audioOffsetMap.get(index) || 0;
+      args.jobLog(`  Audio mapping: ${inputIdx}:a:${sourceAudioIndex} → output audio:${audioOutputIndex} (${langCode}, offset: ${offset.toFixed(3)}s)`);
+      audioOutputIndex++;
+    }
+  });
+
+  // Map subtitle streams from input 0 (no offset needed for subtitles)
+  let subtitleOutputIndex = 0;
+  keptSubtitleStreams.forEach(({ stream, index, needsConversion }) => {
+    // Find subtitle stream index within source file
+    const sourceSubtitleStreams = args.inputFileObj?.ffProbeData?.streams?.filter(s => s.codec_type === 'subtitle') || [];
+    const sourceSubtitleIndex = sourceSubtitleStreams.findIndex(s => s.index === index);
+    
+    if (sourceSubtitleIndex >= 0) {
+      ffmpegArgs.push('-map', `0:s:${sourceSubtitleIndex}`);
+      
+      if (needsConversion) {
+        ffmpegArgs.push(`-c:s:${subtitleOutputIndex}`, 'srt');
+        args.jobLog(`  Subtitle mapping: 0:s:${sourceSubtitleIndex} → output subtitle:${subtitleOutputIndex} (convert to SRT)`);
+      } else {
+        ffmpegArgs.push(`-c:s:${subtitleOutputIndex}`, 'copy');
+        args.jobLog(`  Subtitle mapping: 0:s:${sourceSubtitleIndex} → output subtitle:${subtitleOutputIndex} (copy)`);
+      }
+      
+      ffmpegArgs.push(`-metadata:s:s:${subtitleOutputIndex}`, 'language=eng');
+      
+      if (subtitleOutputIndex === 0) {
+        ffmpegArgs.push(`-disposition:s:${subtitleOutputIndex}`, 'default');
+      } else {
+        ffmpegArgs.push(`-disposition:s:${subtitleOutputIndex}`, '0');
+      }
+      
+      subtitleOutputIndex++;
+    }
+  });
+
+  // Add output muxing flags
+  ffmpegArgs.push('-avoid_negative_ts', 'make_zero');
+  ffmpegArgs.push('-y', outputFile);
+
+  return ffmpegArgs;
+}
+
+/*
  * Detects language from stream metadata using title and language tags
  * @param {Object} stream - FFprobe stream object
  * @returns {string} Detected language code or 'commentary' or 'unknown'
@@ -1203,7 +1419,31 @@ module.exports = async (args) => {
     args.jobLog(`Keeping ${keptSubtitleStreams.length} subtitle streams`);
     args.jobLog(`Need conversion: ${subtitleConversions.length} streams`);
 
-    // === STEP 4: CRITICAL SAFETY CHECKS AND PROCESSING VALIDATION ===
+    // === STEP 4: A/V DESYNC ANALYSIS ===
+    args.jobLog('\n━━━ A/V Desync Analysis ━━━');
+    
+    // Add language information to kept audio streams for desync analysis
+    const keptAudioStreamsWithLang = keptAudioStreams.map(({ stream, index }) => ({
+      stream,
+      index,
+      lang: detectLanguage(stream)
+    }));
+    
+    // Analyze A/V desync
+    const desyncAnalysis = analyzeAVDesync(videoStreams, keptAudioStreamsWithLang, args);
+    
+    args.jobLog(`Desync analysis result: ${desyncAnalysis.reason}`);
+    if (desyncAnalysis.needsOffset) {
+      args.jobLog(`🔧 A/V desync detected - will apply -itsoffset correction`);
+      args.jobLog(`  Video start time: ${desyncAnalysis.videoStartTime.toFixed(3)}s`);
+      desyncAnalysis.desyncResults.forEach(result => {
+        args.jobLog(`  Audio stream ${result.streamIndex} (${result.language}): ${result.desyncOffset.toFixed(3)}s offset`);
+      });
+    } else {
+      args.jobLog(`✅ A/V sync within acceptable range - no offset correction needed`);
+    }
+
+    // === STEP 5: CRITICAL SAFETY CHECKS AND PROCESSING VALIDATION ===
     args.jobLog('\n━━━ Critical Safety Checks ━━━');
     
     // CRITICAL: Ensure we have at least one video stream
@@ -1325,177 +1565,166 @@ module.exports = async (args) => {
       }
     });
     
-    // Build FFmpeg command with enhanced error tolerance and explicit stream mapping
-    const ffmpegArgs = [
-      // CRITICAL: Enhanced input error handling flags - handle corrupted packets and streams gracefully
-      '-fflags', '+discardcorrupt+genpts+igndts+flush_packets',
-      '-err_detect', 'ignore_err',
-      '-analyzeduration', '10000000',  // Increase analysis duration for problematic files
-      '-probesize', '10000000',        // Increase probe size for better stream detection
-      '-max_error_rate', '1.0',        // Allow up to 100% error rate (very tolerant)
-      '-ignore_unknown',               // Ignore unknown streams/codecs
-      // CRITICAL: Add stream-specific error handling to prevent demuxing failures
-      '-xerror',                       // Exit on error (but combined with error tolerance flags)
-      '-max_streams', '50',            // Limit maximum streams to prevent resource exhaustion
-      // Enhanced progress reporting flags for Tdarr compatibility
-      '-progress', 'pipe:2',           // Send progress to stderr for better parsing
-      '-stats_period', '1',            // Update progress every 1 second
-      '-v', 'info',                    // Set verbosity to info level for progress data
-    ];
+    // Choose FFmpeg command construction based on desync analysis
+    let ffmpegArgs;
     
-    // CRITICAL FIX: Identify problematic streams that need to be excluded
-    // Log which streams are being excluded for debugging
-    const excludedStreams = [];
-    subtitleStreams.forEach((stream, index) => {
-      const isKept = keptSubtitleStreams.some(kept => kept.stream.index === stream.index);
-      if (!isKept) {
-        const validationResult = streamValidationResults.get(stream.index);
-        if (validationResult && !validationResult.isValid) {
-          excludedStreams.push(`${stream.index} (${stream.codec_name}) - ${validationResult.reasons.join(', ')}`);
-          args.jobLog(`🔧 Will exclude problematic subtitle stream: ${stream.index} (${stream.codec_name}) - ${validationResult.reasons.join(', ')}`);
-        } else if (['hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle'].includes(stream.codec_name)) {
-          excludedStreams.push(`${stream.index} (${stream.codec_name}) - bitmap subtitle not convertible`);
-          args.jobLog(`🔧 Will exclude bitmap subtitle stream: ${stream.index} (${stream.codec_name}) - not convertible`);
-        }
-      }
-    });
-    
-    if (excludedStreams.length > 0) {
-      args.jobLog(`🔧 Excluding ${excludedStreams.length} problematic streams via input-level stream selection`);
-    }
-    
-    // CRITICAL FIX: Use input-level stream selection to avoid reading problematic streams entirely
-    // This prevents the "Could not find codec parameters" errors during input analysis
-    const validStreamSpecs = [];
-    
-    // Add video streams (always keep first video)
-    if (videoStreams.length > 0) {
-      validStreamSpecs.push('0:v:0');
-    }
-    
-    // Add valid audio streams
-    keptAudioStreams.forEach(({ stream }) => {
-      const audioIndex = audioStreams.findIndex(s => s.index === stream.index);
-      if (audioIndex >= 0) {
-        validStreamSpecs.push(`0:a:${audioIndex}`);
-      }
-    });
-    
-    // Add valid subtitle streams (only if we have any to keep)
-    if (keptSubtitleStreams.length > 0) {
-      keptSubtitleStreams.forEach(({ stream }) => {
-        const subtitleIndex = subtitleStreams.findIndex(s => s.index === stream.index);
-        if (subtitleIndex >= 0) {
-          validStreamSpecs.push(`0:s:${subtitleIndex}`);
+    if (desyncAnalysis.needsOffset) {
+      // Use desync-corrected FFmpeg command with -itsoffset
+      ffmpegArgs = buildDesyncCorrectedFFmpegArgs(
+        sourceFile, 
+        outputFile, 
+        videoStreams, 
+        keptAudioStreamsWithLang, 
+        keptSubtitleStreams, 
+        desyncAnalysis, 
+        args
+      );
+    } else {
+      // Use standard FFmpeg command (existing logic)
+      ffmpegArgs = [
+        // CRITICAL: Enhanced input error handling flags - handle corrupted packets and streams gracefully
+        '-fflags', '+discardcorrupt+genpts+igndts+flush_packets',
+        '-err_detect', 'ignore_err',
+        '-analyzeduration', '10000000',  // Increase analysis duration for problematic files
+        '-probesize', '10000000',        // Increase probe size for better stream detection
+        '-max_error_rate', '1.0',        // Allow up to 100% error rate (very tolerant)
+        '-ignore_unknown',               // Ignore unknown streams/codecs
+        // CRITICAL: Add stream-specific error handling to prevent demuxing failures
+        '-xerror',                       // Exit on error (but combined with error tolerance flags)
+        '-max_streams', '50',            // Limit maximum streams to prevent resource exhaustion
+        // Enhanced progress reporting flags for Tdarr compatibility
+        '-progress', 'pipe:2',           // Send progress to stderr for better parsing
+        '-stats_period', '1',            // Update progress every 1 second
+        '-v', 'info',                    // Set verbosity to info level for progress data
+      ];
+      
+      // CRITICAL FIX: Identify problematic streams that need to be excluded
+      // Log which streams are being excluded for debugging
+      const excludedStreams = [];
+      subtitleStreams.forEach((stream, index) => {
+        const isKept = keptSubtitleStreams.some(kept => kept.stream.index === stream.index);
+        if (!isKept) {
+          const validationResult = streamValidationResults.get(stream.index);
+          if (validationResult && !validationResult.isValid) {
+            excludedStreams.push(`${stream.index} (${stream.codec_name}) - ${validationResult.reasons.join(', ')}`);
+            args.jobLog(`🔧 Will exclude problematic subtitle stream: ${stream.index} (${stream.codec_name}) - ${validationResult.reasons.join(', ')}`);
+          } else if (['hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle'].includes(stream.codec_name)) {
+            excludedStreams.push(`${stream.index} (${stream.codec_name}) - bitmap subtitle not convertible`);
+            args.jobLog(`🔧 Will exclude bitmap subtitle stream: ${stream.index} (${stream.codec_name}) - not convertible`);
+          }
         }
       });
+      
+      if (excludedStreams.length > 0) {
+        args.jobLog(`🔧 Excluding ${excludedStreams.length} problematic streams via input-level stream selection`);
+      }
+      
+      // Add input file first
+      ffmpegArgs.push('-i', sourceFile);
+      
+      // Add metadata and chapter preservation
+      ffmpegArgs.push('-map_metadata', '0'); // Preserve metadata
+      ffmpegArgs.push('-map_chapters', '0');  // Preserve chapters
+      ffmpegArgs.push('-max_muxing_queue_size', '1024'); // Increase muxing queue size for problematic streams (OUTPUT option)
+      
+      // CRITICAL FIX: If no subtitles are being kept, explicitly disable subtitle processing
+      if (keptSubtitleStreams.length === 0) {
+        args.jobLog(`🔧 CRITICAL FIX: No compatible subtitles found - explicitly disabling subtitle processing`);
+        ffmpegArgs.push('-sn');  // Disable subtitle streams entirely
+      }
+
+      let outputStreamIndex = 0;
+
+      // CRITICAL FIX: Use simplified approach - just map the streams we want to keep
+      // Don't try to be clever with input-level selection, just use standard mapping
+      
+      // Map video streams (keep only the first one)
+      if (videoStreams.length > 0) {
+        ffmpegArgs.push('-map', '0:v:0');
+        ffmpegArgs.push(`-c:v:${outputStreamIndex}`, 'copy');
+        args.jobLog(`  Video ${outputStreamIndex}: stream 0:v:0 (copy)`);
+        
+        if (videoStreams.length > 1) {
+          args.jobLog(`  ⚠️ Skipping ${videoStreams.length - 1} additional video stream(s)`);
+        }
+        
+        outputStreamIndex++;
+      }
+
+      // Map audio streams (filtered) - use safer stream mapping
+      let audioOutputIndex = 0;
+      keptAudioStreams.forEach(({ stream, index }) => {
+        // Use original stream index for safer mapping
+        const audioIndex = audioStreams.findIndex(s => s.index === stream.index);
+        if (audioIndex < 0) {
+          throw new Error(`Internal mapping error: audio stream ${stream.index} not found`);
+        }
+        
+        const streamSpec = `0:a:${audioIndex}`;
+        ffmpegArgs.push('-map', streamSpec);
+        ffmpegArgs.push(`-c:a:${audioOutputIndex}`, 'copy');
+        
+        // Set language metadata
+        const detectedLang = detectLanguage(stream);
+        const langCode = detectedLang === 'eng' ? 'eng' :
+                        detectedLang === 'jpn' ? 'jpn' :
+                        detectedLang === 'kor' ? 'kor' :
+                        detectedLang === 'fre' ? 'fre' : 'und';
+        
+        ffmpegArgs.push(`-metadata:s:a:${audioOutputIndex}`, `language=${langCode}`);
+        
+        // Set first English stream as default
+        if (audioOutputIndex === 0 && detectedLang === 'eng') {
+          ffmpegArgs.push(`-disposition:a:${audioOutputIndex}`, 'default');
+        } else {
+          ffmpegArgs.push(`-disposition:a:${audioOutputIndex}`, '0');
+        }
+        
+        args.jobLog(`  Audio ${audioOutputIndex}: ${streamSpec} (${langCode}, ${audioOutputIndex === 0 ? 'default' : 'non-default'})`);
+        audioOutputIndex++;
+      });
+
+      // Map subtitle streams (filtered and converted) - use safer stream mapping
+      let subtitleOutputIndex = 0;
+      keptSubtitleStreams.forEach(({ stream, index, needsConversion }) => {
+        // Use original stream index for safer mapping
+        const subtitleIndex = subtitleStreams.findIndex(s => s.index === stream.index);
+        if (subtitleIndex < 0) {
+          throw new Error(`Internal mapping error: subtitle stream ${stream.index} not found`);
+        }
+        
+        const streamSpec = `0:s:${subtitleIndex}`;
+        ffmpegArgs.push('-map', streamSpec);
+        
+        if (needsConversion) {
+          ffmpegArgs.push(`-c:s:${subtitleOutputIndex}`, 'srt');
+          args.jobLog(`  Subtitle ${subtitleOutputIndex}: ${streamSpec} (convert to SRT)`);
+        } else {
+          ffmpegArgs.push(`-c:s:${subtitleOutputIndex}`, 'copy');
+          args.jobLog(`  Subtitle ${subtitleOutputIndex}: ${streamSpec} (copy)`);
+        }
+        
+        ffmpegArgs.push(`-metadata:s:s:${subtitleOutputIndex}`, 'language=eng');
+        
+        // Set first subtitle as default
+        if (subtitleOutputIndex === 0) {
+          ffmpegArgs.push(`-disposition:s:${subtitleOutputIndex}`, 'default');
+        } else {
+          ffmpegArgs.push(`-disposition:s:${subtitleOutputIndex}`, '0');
+        }
+        
+        subtitleOutputIndex++;
+      });
+
+      // Add output muxing flags for better error tolerance and timestamp handling
+      ffmpegArgs.push('-avoid_negative_ts', 'make_zero');
+      // CRITICAL FIX: Remove strict interleave delta to prevent muxing failures with problematic streams
+      // The previous '-max_interleave_delta', '0' setting was too strict and caused "Invalid argument" errors
+      // when streams had timing issues or ended unexpectedly
+      
+      // Add output file and overwrite flag
+      ffmpegArgs.push('-y', outputFile);
     }
-    
-    // Add input file first
-    ffmpegArgs.push('-i', sourceFile);
-    
-    // Add metadata and chapter preservation
-    ffmpegArgs.push('-map_metadata', '0'); // Preserve metadata
-    ffmpegArgs.push('-map_chapters', '0');  // Preserve chapters
-    ffmpegArgs.push('-max_muxing_queue_size', '1024'); // Increase muxing queue size for problematic streams (OUTPUT option)
-    
-    // CRITICAL FIX: If no subtitles are being kept, explicitly disable subtitle processing
-    if (keptSubtitleStreams.length === 0) {
-      args.jobLog(`🔧 CRITICAL FIX: No compatible subtitles found - explicitly disabling subtitle processing`);
-      ffmpegArgs.push('-sn');  // Disable subtitle streams entirely
-    }
-
-    let outputStreamIndex = 0;
-
-    // CRITICAL FIX: Use simplified approach - just map the streams we want to keep
-    // Don't try to be clever with input-level selection, just use standard mapping
-    
-    // Map video streams (keep only the first one)
-    if (videoStreams.length > 0) {
-      ffmpegArgs.push('-map', '0:v:0');
-      ffmpegArgs.push(`-c:v:${outputStreamIndex}`, 'copy');
-      args.jobLog(`  Video ${outputStreamIndex}: stream 0:v:0 (copy)`);
-      
-      if (videoStreams.length > 1) {
-        args.jobLog(`  ⚠️ Skipping ${videoStreams.length - 1} additional video stream(s)`);
-      }
-      
-      outputStreamIndex++;
-    }
-
-    // Map audio streams (filtered) - use safer stream mapping
-    let audioOutputIndex = 0;
-    keptAudioStreams.forEach(({ stream, index }) => {
-      // Use original stream index for safer mapping
-      const audioIndex = audioStreams.findIndex(s => s.index === stream.index);
-      if (audioIndex < 0) {
-        throw new Error(`Internal mapping error: audio stream ${stream.index} not found`);
-      }
-      
-      const streamSpec = `0:a:${audioIndex}`;
-      ffmpegArgs.push('-map', streamSpec);
-      ffmpegArgs.push(`-c:a:${audioOutputIndex}`, 'copy');
-      
-      // Set language metadata
-      const detectedLang = detectLanguage(stream);
-      const langCode = detectedLang === 'eng' ? 'eng' :
-                      detectedLang === 'jpn' ? 'jpn' :
-                      detectedLang === 'kor' ? 'kor' :
-                      detectedLang === 'fre' ? 'fre' : 'und';
-      
-      ffmpegArgs.push(`-metadata:s:a:${audioOutputIndex}`, `language=${langCode}`);
-      
-      // Set first English stream as default
-      if (audioOutputIndex === 0 && detectedLang === 'eng') {
-        ffmpegArgs.push(`-disposition:a:${audioOutputIndex}`, 'default');
-      } else {
-        ffmpegArgs.push(`-disposition:a:${audioOutputIndex}`, '0');
-      }
-      
-      args.jobLog(`  Audio ${audioOutputIndex}: ${streamSpec} (${langCode}, ${audioOutputIndex === 0 ? 'default' : 'non-default'})`);
-      audioOutputIndex++;
-    });
-
-    // Map subtitle streams (filtered and converted) - use safer stream mapping
-    let subtitleOutputIndex = 0;
-    keptSubtitleStreams.forEach(({ stream, index, needsConversion }) => {
-      // Use original stream index for safer mapping
-      const subtitleIndex = subtitleStreams.findIndex(s => s.index === stream.index);
-      if (subtitleIndex < 0) {
-        throw new Error(`Internal mapping error: subtitle stream ${stream.index} not found`);
-      }
-      
-      const streamSpec = `0:s:${subtitleIndex}`;
-      ffmpegArgs.push('-map', streamSpec);
-      
-      if (needsConversion) {
-        ffmpegArgs.push(`-c:s:${subtitleOutputIndex}`, 'srt');
-        args.jobLog(`  Subtitle ${subtitleOutputIndex}: ${streamSpec} (convert to SRT)`);
-      } else {
-        ffmpegArgs.push(`-c:s:${subtitleOutputIndex}`, 'copy');
-        args.jobLog(`  Subtitle ${subtitleOutputIndex}: ${streamSpec} (copy)`);
-      }
-      
-      ffmpegArgs.push(`-metadata:s:s:${subtitleOutputIndex}`, 'language=eng');
-      
-      // Set first subtitle as default
-      if (subtitleOutputIndex === 0) {
-        ffmpegArgs.push(`-disposition:s:${subtitleOutputIndex}`, 'default');
-      } else {
-        ffmpegArgs.push(`-disposition:s:${subtitleOutputIndex}`, '0');
-      }
-      
-      subtitleOutputIndex++;
-    });
-
-    // Add output muxing flags for better error tolerance and timestamp handling
-    ffmpegArgs.push('-avoid_negative_ts', 'make_zero');
-    // CRITICAL FIX: Remove strict interleave delta to prevent muxing failures with problematic streams
-    // The previous '-max_interleave_delta', '0' setting was too strict and caused "Invalid argument" errors
-    // when streams had timing issues or ended unexpectedly
-    
-    // Add output file and overwrite flag
-    ffmpegArgs.push('-y', outputFile);
 
     // Additional path validation and debugging
     args.jobLog(`\n━━━ Path Validation ━━━`);
@@ -1750,6 +1979,9 @@ module.exports = async (args) => {
     }
     if (subtitleConversions.length > 0) {
       args.jobLog(`  🔄 Converted ${subtitleConversions.length} subtitle(s) to SRT`);
+    }
+    if (desyncAnalysis.needsOffset) {
+      args.jobLog(`  🔧 Applied A/V desync correction (max offset: ${desyncAnalysis.maxAbsOffsetMs.toFixed(1)}ms)`);
     }
     args.jobLog(`  📋 Kept ${keptAudioStreams.length} audio + ${keptSubtitleStreams.length} subtitle streams`);
     args.jobLog(`  🎯 English content prioritized for maximum compatibility`);
