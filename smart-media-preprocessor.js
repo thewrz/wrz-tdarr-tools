@@ -139,7 +139,7 @@ function buildDesyncCorrectedFFmpegArgs(sourceFile, outputFile, videoStreams, ke
     '-probesize', '10000000',
     '-max_error_rate', '1.0',
     '-ignore_unknown',
-    '-xerror',
+    // '-xerror',
     // CRITICAL FIX: Remove max_streams limit that was causing failures with high-stream-count files
     // Files with 50+ streams (common with multi-language subtitle tracks) were failing with "Cannot allocate memory"
     '-progress', 'pipe:2',
@@ -209,7 +209,8 @@ function buildDesyncCorrectedFFmpegArgs(sourceFile, outputFile, videoStreams, ke
     if (sourceAudioIndex >= 0) {
       // CRITICAL FIX: Map using the audio stream index within the input, not the absolute stream index
       ffmpegArgs.push('-map', `${inputIdx}:a:${sourceAudioIndex}`);
-      ffmpegArgs.push(`-c:a:${audioOutputIndex}`, 'copy');
+      ffmpegArgs.push(`-c:a:${audioOutputIndex}`, 'aac');
+      ffmpegArgs.push(`-b:a:${audioOutputIndex}`, '320k'); // or whatever bitrate
       
       // Set language metadata
       const detectedLang = detectLanguage(stream);
@@ -1600,7 +1601,7 @@ module.exports = async (args) => {
         '-max_error_rate', '1.0',        // Allow up to 100% error rate (very tolerant)
         '-ignore_unknown',               // Ignore unknown streams/codecs
         // CRITICAL: Add stream-specific error handling to prevent demuxing failures
-        '-xerror',                       // Exit on error (but combined with error tolerance flags)
+        // '-xerror',                       // Exit on error (but combined with error tolerance flags)
         // CRITICAL FIX: Remove max_streams limit that was causing failures with high-stream-count files
         // Files with 50+ streams (common with multi-language subtitle tracks) were failing with "Cannot allocate memory"
         // Enhanced progress reporting flags for Tdarr compatibility
@@ -1674,7 +1675,8 @@ module.exports = async (args) => {
         
         const streamSpec = `0:a:${audioIndex}`;
         ffmpegArgs.push('-map', streamSpec);
-        ffmpegArgs.push(`-c:a:${audioOutputIndex}`, 'copy');
+        ffmpegArgs.push(`-c:a:${audioOutputIndex}`, 'aac');
+        ffmpegArgs.push(`-b:a:${audioOutputIndex}`, '320k'); // optional bitrate
         
         // Set language metadata
         const detectedLang = detectLanguage(stream);
