@@ -140,7 +140,8 @@ function buildDesyncCorrectedFFmpegArgs(sourceFile, outputFile, videoStreams, ke
     '-max_error_rate', '1.0',
     '-ignore_unknown',
     '-xerror',
-    '-max_streams', '50',
+    // CRITICAL FIX: Remove max_streams limit that was causing failures with high-stream-count files
+    // Files with 50+ streams (common with multi-language subtitle tracks) were failing with "Cannot allocate memory"
     '-progress', 'pipe:2',
     '-stats_period', '1',
     '-v', 'info'
@@ -198,13 +199,15 @@ function buildDesyncCorrectedFFmpegArgs(sourceFile, outputFile, videoStreams, ke
   let audioOutputIndex = 0;
   keptAudioStreams.forEach(({ stream, index }) => {
     const inputIdx = audioInputMap.get(index);
-    const audioStreamIndex = 0; // Always 0 since each input contains all streams but we select specific ones
     
-    // Find the audio stream index within the source file
+    // CRITICAL FIX: When using multiple inputs with -itsoffset, each input contains ALL streams
+    // We need to map the correct audio stream from each input using the original stream index
+    // Find the audio stream index within the source file's audio streams
     const sourceAudioStreams = args.inputFileObj?.ffProbeData?.streams?.filter(s => s.codec_type === 'audio') || [];
     const sourceAudioIndex = sourceAudioStreams.findIndex(s => s.index === index);
     
     if (sourceAudioIndex >= 0) {
+      // CRITICAL FIX: Map using the audio stream index within the input, not the absolute stream index
       ffmpegArgs.push('-map', `${inputIdx}:a:${sourceAudioIndex}`);
       ffmpegArgs.push(`-c:a:${audioOutputIndex}`, 'copy');
       
@@ -227,6 +230,11 @@ function buildDesyncCorrectedFFmpegArgs(sourceFile, outputFile, videoStreams, ke
       const offset = audioOffsetMap.get(index) || 0;
       args.jobLog(`  Audio mapping: ${inputIdx}:a:${sourceAudioIndex} → output audio:${audioOutputIndex} (${langCode}, offset: ${offset.toFixed(3)}s)`);
       audioOutputIndex++;
+    } else {
+      // CRITICAL ERROR: If we can't find the audio stream, this is a serious mapping issue
+      args.jobLog(`❌ CRITICAL ERROR: Cannot find audio stream ${index} in source audio streams`);
+      args.jobLog(`   Available audio streams: ${sourceAudioStreams.map(s => s.index).join(', ')}`);
+      throw new Error(`Audio stream mapping failed: stream ${index} not found in source`);
     }
   });
 
@@ -1031,33 +1039,34 @@ module.exports = async (args) => {
       other: []
     };
 
-    audioStreams.forEach((stream, index) => {
+    audioStreams.forEach((stream, arrayIndex) => {
       const detectedLang = detectLanguage(stream);
       const title = stream.tags?.title || '';
       const language = stream.tags?.language || 'und';
+      const streamIndex = stream.index; // Use actual stream index from FFprobe
       
-      args.jobLog(`  Stream ${index}: "${title}" (${language}) → ${detectedLang}`);
+      args.jobLog(`  Stream ${streamIndex}: "${title}" (${language}) → ${detectedLang}`);
       
       // Validate that the audio stream contains actual data
-      if (!validateAudioStream(stream, index, args, sourceFile, ffprobePath, ffmpegPath)) {
+      if (!validateAudioStream(stream, streamIndex, args, sourceFile, ffprobePath, ffmpegPath)) {
         args.jobLog(`    → Skipping (failed validation - empty or corrupted audio stream)`);
         return;
       }
       
       if (detectedLang === 'commentary') {
-        audioCategories.commentary.push({ stream, index });
+        audioCategories.commentary.push({ stream, index: streamIndex });
       } else if (detectedLang === 'eng') {
-        audioCategories.english.push({ stream, index });
+        audioCategories.english.push({ stream, index: streamIndex });
       } else if (detectedLang === 'jpn') {
-        audioCategories.japanese.push({ stream, index });
+        audioCategories.japanese.push({ stream, index: streamIndex });
       } else if (detectedLang === 'kor') {
-        audioCategories.korean.push({ stream, index });
+        audioCategories.korean.push({ stream, index: streamIndex });
       } else if (detectedLang === 'fre') {
-        audioCategories.french.push({ stream, index });
+        audioCategories.french.push({ stream, index: streamIndex });
       } else if (detectedLang === 'unknown') {
-        audioCategories.unknown.push({ stream, index });
+        audioCategories.unknown.push({ stream, index: streamIndex });
       } else {
-        audioCategories.other.push({ stream, index });
+        audioCategories.other.push({ stream, index: streamIndex });
       }
     });
 
@@ -1321,15 +1330,16 @@ module.exports = async (args) => {
       return true;
     }
 
-    subtitleStreams.forEach((stream, index) => {
+    subtitleStreams.forEach((stream, arrayIndex) => {
       const title = (stream.tags?.title || '').toLowerCase();
       const language = (stream.tags?.language || '').toLowerCase();
       const codec = stream.codec_name || '';
+      const streamIndex = stream.index; // Use actual stream index from FFprobe
       
-      args.jobLog(`  Stream ${index}: "${stream.tags?.title || ''}" (${language}, ${codec})`);
+      args.jobLog(`  Stream ${streamIndex}: "${stream.tags?.title || ''}" (${language}, ${codec})`);
 
       // First, validate that the stream contains actual data
-      if (!validateSubtitleStream(stream, index, args, sourceFile, ffprobePath)) {
+      if (!validateSubtitleStream(stream, streamIndex, args, sourceFile, ffprobePath)) {
         args.jobLog(`    → Skipping (failed validation - empty or corrupted stream)`);
         return;
       }
@@ -1346,12 +1356,12 @@ module.exports = async (args) => {
 
       if (isEnglish) {
         // Categorize as English
-        const streamData = { stream, index, codec };
+        const streamData = { stream, index: streamIndex, codec };
         subtitleCategories.english.push(streamData);
         args.jobLog(`    → Detected as English`);
       } else if (language === 'und' || language === '' || !language) {
         // Unknown/undefined language - could be English but undetectable
-        const streamData = { stream, index, codec };
+        const streamData = { stream, index: streamIndex, codec };
         subtitleCategories.unknown.push(streamData);
         args.jobLog(`    → Language undetectable (${language || 'undefined'})`);
       } else {
@@ -1465,7 +1475,7 @@ module.exports = async (args) => {
       if (audioStreams.length > 0) {
         args.jobLog('🔄 FALLBACK: Adding first original audio stream to prevent audio-less output');
         const firstAudioStream = audioStreams[0];
-        keptAudioStreams.push({ stream: firstAudioStream, index: 0 });
+        keptAudioStreams.push({ stream: firstAudioStream, index: firstAudioStream.index });
         args.jobLog(`   Added fallback audio stream: ${firstAudioStream.codec_name || 'unknown codec'}`);
       } else {
         args.jobLog('❌ CRITICAL ERROR: No audio streams exist in source file');
@@ -1591,7 +1601,8 @@ module.exports = async (args) => {
         '-ignore_unknown',               // Ignore unknown streams/codecs
         // CRITICAL: Add stream-specific error handling to prevent demuxing failures
         '-xerror',                       // Exit on error (but combined with error tolerance flags)
-        '-max_streams', '50',            // Limit maximum streams to prevent resource exhaustion
+        // CRITICAL FIX: Remove max_streams limit that was causing failures with high-stream-count files
+        // Files with 50+ streams (common with multi-language subtitle tracks) were failing with "Cannot allocate memory"
         // Enhanced progress reporting flags for Tdarr compatibility
         '-progress', 'pipe:2',           // Send progress to stderr for better parsing
         '-stats_period', '1',            // Update progress every 1 second
@@ -1654,10 +1665,11 @@ module.exports = async (args) => {
       // Map audio streams (filtered) - use safer stream mapping
       let audioOutputIndex = 0;
       keptAudioStreams.forEach(({ stream, index }) => {
-        // Use original stream index for safer mapping
-        const audioIndex = audioStreams.findIndex(s => s.index === stream.index);
+        // CRITICAL FIX: Use the actual stream index, not array position
+        // Find the audio stream index within the source file's audio streams
+        const audioIndex = audioStreams.findIndex(s => s.index === index);
         if (audioIndex < 0) {
-          throw new Error(`Internal mapping error: audio stream ${stream.index} not found`);
+          throw new Error(`Internal mapping error: audio stream ${index} not found`);
         }
         
         const streamSpec = `0:a:${audioIndex}`;
@@ -1687,10 +1699,11 @@ module.exports = async (args) => {
       // Map subtitle streams (filtered and converted) - use safer stream mapping
       let subtitleOutputIndex = 0;
       keptSubtitleStreams.forEach(({ stream, index, needsConversion }) => {
-        // Use original stream index for safer mapping
-        const subtitleIndex = subtitleStreams.findIndex(s => s.index === stream.index);
+        // CRITICAL FIX: Use the actual stream index, not array position
+        // Find the subtitle stream index within the source file's subtitle streams
+        const subtitleIndex = subtitleStreams.findIndex(s => s.index === index);
         if (subtitleIndex < 0) {
-          throw new Error(`Internal mapping error: subtitle stream ${stream.index} not found`);
+          throw new Error(`Internal mapping error: subtitle stream ${index} not found`);
         }
         
         const streamSpec = `0:s:${subtitleIndex}`;
@@ -1956,6 +1969,58 @@ module.exports = async (args) => {
       throw new Error(`Output file was not created: ${outputFile}`);
     }
 
+    // CRITICAL: Post-mux validation - probe the output file to ensure audio streams are present
+    args.jobLog('🔍 Post-mux validation: Probing output file...');
+    let outputProbeData;
+    try {
+      const outputProbeResult = execFileSync(ffprobePath, [
+        '-v', 'quiet',
+        '-print_format', 'json',
+        '-show_streams',
+        '-show_format',
+        outputFile
+      ], { encoding: 'utf8', maxBuffer: 1024 * 1024 * 10 });
+      
+      outputProbeData = JSON.parse(outputProbeResult);
+    } catch (error) {
+      args.jobLog(`❌ CRITICAL ERROR: Cannot probe output file: ${error.message}`);
+      throw new Error(`Post-mux validation failed: ${error.message}`);
+    }
+
+    const outputStreams = outputProbeData.streams || [];
+    const outputVideoStreams = outputStreams.filter(s => s.codec_type === 'video');
+    const outputAudioStreams = outputStreams.filter(s => s.codec_type === 'audio');
+    const outputSubtitleStreams = outputStreams.filter(s => s.codec_type === 'subtitle');
+
+    args.jobLog(`📊 Post-mux stream counts:`);
+    args.jobLog(`  Video streams: ${outputVideoStreams.length}`);
+    args.jobLog(`  Audio streams: ${outputAudioStreams.length}`);
+    args.jobLog(`  Subtitle streams: ${outputSubtitleStreams.length}`);
+
+    // CRITICAL: Ensure audio streams are present in the output
+    if (keptAudioStreams.length > 0 && outputAudioStreams.length === 0) {
+      args.jobLog(`❌ CRITICAL ERROR: Expected ${keptAudioStreams.length} audio streams but output has 0!`);
+      args.jobLog(`   This is the exact issue causing the downstream "Missing audio" error.`);
+      args.jobLog(`   FFmpeg command may have failed to map audio streams correctly.`);
+      throw new Error(`Post-mux validation failed: No audio streams in output despite expecting ${keptAudioStreams.length}`);
+    }
+
+    if (outputAudioStreams.length !== keptAudioStreams.length) {
+      args.jobLog(`⚠️ WARNING: Audio stream count mismatch - expected ${keptAudioStreams.length}, got ${outputAudioStreams.length}`);
+      // Log details about each output audio stream for debugging
+      outputAudioStreams.forEach((stream, index) => {
+        args.jobLog(`    Output audio ${index}: ${stream.codec_name}, ${stream.channels}ch, ${stream.tags?.language || 'und'}`);
+      });
+    }
+
+    // CRITICAL: Ensure video streams are present
+    if (videoStreams.length > 0 && outputVideoStreams.length === 0) {
+      args.jobLog(`❌ CRITICAL ERROR: Expected ${videoStreams.length} video streams but output has 0!`);
+      throw new Error(`Post-mux validation failed: No video streams in output`);
+    }
+
+    args.jobLog(`✅ Post-mux validation PASSED: Audio and video streams are present in output`);
+
     const sourceStats = fs.statSync(sourceFile);
     const outputStats = fs.statSync(outputFile);
     
@@ -1963,7 +2028,7 @@ module.exports = async (args) => {
     args.jobLog(`  Source size: ${(sourceStats.size / 1024 / 1024).toFixed(2)} MB`);
     args.jobLog(`  Output size: ${(outputStats.size / 1024 / 1024).toFixed(2)} MB`);
     args.jobLog(`  Size change: ${((outputStats.size - sourceStats.size) / 1024 / 1024).toFixed(2)} MB`);
-    args.jobLog(`  Streams: ${totalOriginalStreams} → ${totalKeptStreams}`);
+    args.jobLog(`  Streams: ${totalOriginalStreams} → ${totalKeptStreams} (verified: ${outputStreams.length})`);
 
     // === STEP 8: RETURN WORKING FILE ===
     args.jobLog('\n═══════════════════════════════════════');
