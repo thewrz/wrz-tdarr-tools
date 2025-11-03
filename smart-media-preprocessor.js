@@ -1034,7 +1034,7 @@ module.exports = async (args) => {
       );
     }
 
-    // Audio and subtitle streams as before
+    // Construct audio and subtitle streams list
     const audioStreams = streams.filter(s => s.codec_type === 'audio');
     const subtitleStreams = streams.filter(s => s.codec_type === 'subtitle');
 
@@ -1692,6 +1692,7 @@ module.exports = async (args) => {
         const streamSpec = `0:a:${audioIndex}`;
         ffmpegArgs.push('-map', streamSpec);
         ffmpegArgs.push(`-c:a:${audioOutputIndex}`, 'aac');
+        ffmpegArgs.push(`-ac:a:${audioOutputIndex}`, '2');  // stereo
         ffmpegArgs.push(`-b:a:${audioOutputIndex}`, '320k'); // optional bitrate
         
         // Set language metadata
