@@ -1,57 +1,42 @@
 module.exports = async (args) => {
   try {
-    // Get the primary audio stream from ffProbeData
-    const audioStreams = args.inputFileObj.ffProbeData.streams.filter(stream => stream.codec_type === 'audio');
-    
+    const streams = args.inputFileObj?.ffProbeData?.streams || [];
+    const audioStreams = streams.filter(
+      s => (s.codec_type || s.codecType) === 'audio'
+    );
+
     if (audioStreams.length === 0) {
-      // No audio streams found - output 3
       args.jobLog('❓ No audio streams found');
       return {
         outputFileObj: args.inputFileObj,
-        outputNumber: 3,
+        outputNumber: 3, // route for "no audio"
         variables: args.variables,
       };
     }
-    
-    const primaryAudioStream = audioStreams[0];
-    const channels = primaryAudioStream.channels;
-    
+
+    const channels = Number(audioStreams[0].channels) || 0;
+
     if (channels > 2) {
-      // Multi-channel audio detected - needs transcoding to stereo - output 2
-      args.jobLog('🔉🌌 Multi-channel audio detected - needs transcoding');
+      args.jobLog(`🔉🌌 Multi-channel audio detected (${channels} ch)`);
       return {
         outputFileObj: args.inputFileObj,
-        outputNumber: 2,
+        outputNumber: 2, // route for multichannel
         variables: args.variables,
       };
     } else {
-      // Stereo or mono audio - already correct, skip processing - output 1
-      args.jobLog('🎧 Stereo audio detected - skipping (already optimized)');
-      
-      // CRITICAL: Check if subtitle processing was done and needs file replacement
-      if (args.variables && args.variables.forceReplaceOriginal) {
-        args.jobLog('📝 Subtitle changes detected - forcing file replacement despite audio skip');
-        return {
-          outputFileObj: args.inputFileObj,
-          outputNumber: 3, // Route to "replace original file" instead of skip
-          variables: args.variables,
-        };
-      }
-      
+      args.jobLog(`🎧 Stereo/Mono audio detected (${channels} ch)`);
       return {
         outputFileObj: args.inputFileObj,
-        outputNumber: 1,
+        outputNumber: 1, // route for stereo/mono
         variables: args.variables,
       };
     }
-    
   } catch (error) {
-    args.jobLog(`❌ Error checking audio channels: ${error.message}`);
-    // Default to output 4 on error
+    args.jobLog(`❌ Error checking audio channels: ${error?.message || error}`);
     return {
       outputFileObj: args.inputFileObj,
-      outputNumber: 4,
+      outputNumber: 4, // safe default
       variables: args.variables,
     };
   }
-}
+};
