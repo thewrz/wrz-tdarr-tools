@@ -1017,12 +1017,28 @@ module.exports = async (args) => {
     const streams = mediaInfo.streams || [];
     args.jobLog(`Found ${streams.length} streams total`);
 
-    // Categorize streams
-    const videoStreams = streams.filter(s => s.codec_type === 'video');
+    // Identify attached cover-art video streams (disposition.attached_pic == 1)
+    const rawVideoStreams = streams.filter(s => s.codec_type === 'video');
+    const coverArtStreams = rawVideoStreams.filter(
+      s => s.disposition && s.disposition.attached_pic
+    );
+
+    // Filter them out so they never participate in mapping / validation
+    const videoStreams = rawVideoStreams.filter(
+      s => !(s.disposition && s.disposition.attached_pic)
+    );
+
+    if (coverArtStreams.length > 0) {
+      args.jobLog(
+        `🧹 Removing ${coverArtStreams.length} attached cover-art video stream(s) from processing`
+      );
+    }
+
+    // Construct audio and subtitle streams list
     const audioStreams = streams.filter(s => s.codec_type === 'audio');
     const subtitleStreams = streams.filter(s => s.codec_type === 'subtitle');
 
-    args.jobLog(`  Video streams: ${videoStreams.length}`);
+    args.jobLog(`  Video streams (after dropping cover art): ${videoStreams.length}`);
     args.jobLog(`  Audio streams: ${audioStreams.length}`);
     args.jobLog(`  Subtitle streams: ${subtitleStreams.length}`);
 
@@ -1676,6 +1692,7 @@ module.exports = async (args) => {
         const streamSpec = `0:a:${audioIndex}`;
         ffmpegArgs.push('-map', streamSpec);
         ffmpegArgs.push(`-c:a:${audioOutputIndex}`, 'aac');
+        ffmpegArgs.push(`-ac:a:${audioOutputIndex}`, '2');  // stereo
         ffmpegArgs.push(`-b:a:${audioOutputIndex}`, '320k'); // optional bitrate
         
         // Set language metadata
