@@ -190,7 +190,7 @@ module.exports = async (args) => {
         // Multichannel -> stereo downmix with center boost + loudnorm
         ffmpegArgs.push(
           `-filter:a:${i}`,
-          'pan=stereo|FL<1.0*FL+1.414*FC+0.5*BL+0.5*SL|FR<1.0*FR+1.414*FC+0.5*BR+0.5*SR,loudnorm=I=-16:LRA=11:TP=-1.5'
+          'pan=stereo|FL<1.0*FL+1.2*FC+0.6*BL+0.6*SL|FR<1.0*FR+1.2*FC+0.6*BR+0.6*SR,loudnorm=I=-16:LRA=11:TP=-1.5'
         );
         args.jobLog(`Audio ${i}: stream ${audio.index} (${audio.language}, ${audio.channels}ch -> stereo, center boost + loudnorm)`);
       } else {
