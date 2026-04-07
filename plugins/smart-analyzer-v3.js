@@ -433,22 +433,13 @@ module.exports = async (args) => {
   const needsVideoReencode = !isHEVC || !videoBitrateOk;
 
   // Determine target resolution for downscaling
-  // Only downscale if the source is significantly above the target (>10% taller).
-  // This avoids pointless quality loss on files like 1920x800 (cinema 2.4:1) that are
-  // technically "above 720p" but close enough to keep as-is.
+  // Only downscale 4K+ content to 1080p. Keep 1080p and below at native resolution.
   let targetResolution = null;
   if (needsVideoReencode) {
     if (videoHeight > 1080) {
-      // 4K/1440p: keep original (no scaling)
-    } else if (videoHeight > 900) {
-      // True 1080p content (>900 lines) — downscale to 720p
-      // This preserves cinema crops like 1920x800 (2.4:1) which are 720p-class
-      targetResolution = '720p';
-    } else if (videoHeight > 600 && videoHeight <= 720) {
-      // True 720p content (>600 lines, <=720) — downscale to 480p
-      targetResolution = '480p';
+      targetResolution = '1080p';
     }
-    // Otherwise (<=600, or 721-900 like cinema crops): keep original resolution
+    // 1080p and below: keep original resolution
   }
 
   args.jobLog(`Video: ${videoCodec} ${videoWidth}x${videoHeight} (~${estimatedVideoBitrateKbps}kbps)`);

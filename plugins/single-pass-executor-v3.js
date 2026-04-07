@@ -11,13 +11,14 @@
 // from variables to determine behavior.
 
 const VIDEO_QUALITY = {
-  '720p_and_below': '-preset p4 -tune hq -rc vbr -b:v 0 -cq 25 -maxrate 2M -bufsize 4M -spatial_aq 1 -temporal_aq 1 -aq-strength 7 -rc-lookahead 16 -g 240 -pix_fmt yuv420p -profile:v main',
-  '1080p': '-preset p4 -tune hq -rc vbr -b:v 0 -cq 25 -maxrate 5M -bufsize 10M -spatial_aq 1 -temporal_aq 1 -aq-strength 7 -rc-lookahead 16 -g 240 -pix_fmt yuv420p -profile:v main'
+  '720p_and_below': '-preset p4 -tune hq -rc vbr -b:v 0 -cq 26 -maxrate 2M -bufsize 4M -spatial_aq 1 -temporal_aq 1 -aq-strength 7 -rc-lookahead 16 -g 240 -pix_fmt yuv420p -profile:v main',
+  '1080p': '-preset p4 -tune hq -rc vbr -b:v 0 -cq 26 -maxrate 4M -bufsize 8M -spatial_aq 1 -temporal_aq 1 -aq-strength 7 -rc-lookahead 16 -g 240 -pix_fmt yuv420p -profile:v main'
 };
 
 const RESOLUTION_SCALE = {
   '480p': '-2:480',
-  '720p': '-2:720'
+  '720p': '-2:720',
+  '1080p': '-2:1080'
 };
 
 function timeToSeconds(timeString) {
