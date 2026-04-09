@@ -85,6 +85,14 @@ module.exports = async (args) => {
   args.jobLog(`Output: ${outputFile}`);
 
   // ─── BUILD FFMPEG COMMAND ───
+  // Enable full NVIDIA hardware pipeline (NVDEC decode -> GPU memory -> NVENC encode)
+  // when we're re-encoding video AND not downscaling. Eliminates PCIe round-trips and
+  // frees ~1 CPU core that would otherwise be pinned on libavcodec h264 decode.
+  // Expected impact on 3080 Ti: ~350-500 fps vs ~188 fps on 1080p H.264 -> HEVC.
+  // Downscaling path stays on CPU decode since `scale` filter needs CPU frames
+  // (scale_cuda is a follow-up once the basic hwaccel win is proven in production).
+  const useHwaccel = needsVideoReencode && !(targetResolution && RESOLUTION_SCALE[targetResolution]);
+
   const ffmpegArgs = [
     '-fflags', '+discardcorrupt+genpts+igndts+flush_packets',
     '-err_detect', 'ignore_err',
@@ -96,6 +104,11 @@ module.exports = async (args) => {
     '-stats_period', '1',
     '-v', 'info'
   ];
+
+  if (useHwaccel) {
+    ffmpegArgs.push('-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda');
+    args.jobLog('Hardware pipeline: NVDEC decode -> NVENC encode (no PCIe round-trip)');
+  }
 
   // ── Input(s) ──
   // Build a map of audio stream offsets for desync correction
