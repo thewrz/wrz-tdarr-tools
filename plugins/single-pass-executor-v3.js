@@ -173,7 +173,14 @@ module.exports = async (args) => {
     }
 
     // Quality preset
-    const qualityArgs = VIDEO_QUALITY[videoQualityTier] || VIDEO_QUALITY['1080p'];
+    let qualityArgs = VIDEO_QUALITY[videoQualityTier] || VIDEO_QUALITY['1080p'];
+    // When hwaccel cuda is active, frames are in GPU memory (cuda pixel format).
+    // -pix_fmt yuv420p would try to insert a software conversion filter which fails
+    // with "Error reinitializing filters! Function not implemented". NVENC handles
+    // the NV12->yuv420p conversion internally, so we strip the flag.
+    if (useHwaccel) {
+      qualityArgs = qualityArgs.replace('-pix_fmt yuv420p', '').replace(/\s+/g, ' ').trim();
+    }
     ffmpegArgs.push(...qualityArgs.split(' '));
     args.jobLog(`Quality tier: ${videoQualityTier}`);
   } else {
