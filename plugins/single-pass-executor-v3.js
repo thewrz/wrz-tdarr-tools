@@ -11,8 +11,10 @@
 // from variables to determine behavior.
 
 const VIDEO_QUALITY = {
-  '720p_and_below': '-preset p5 -tune hq -rc vbr -b:v 0 -cq 25 -maxrate 2.25M -bufsize 4.5M -spatial_aq 1 -temporal_aq 1 -aq-strength 7 -rc-lookahead 16 -g 240 -pix_fmt yuv420p -profile:v main',
-  '1080p': '-preset p5 -tune hq -rc vbr -b:v 0 -cq 24 -maxrate 5M -bufsize 10M -spatial_aq 1 -temporal_aq 1 -aq-strength 7 -rc-lookahead 16 -g 240 -pix_fmt yuv420p -profile:v main'
+  '720p_and_below':    '-preset p5 -tune hq -rc vbr -b:v 0 -cq 25 -maxrate 2.25M -bufsize 4.5M -spatial_aq 1 -temporal_aq 1 -aq-strength 7 -rc-lookahead 16 -g 240 -pix_fmt yuv420p -profile:v main',
+  '720p_and_below_hq': '-preset p5 -tune hq -rc vbr -b:v 0 -cq 22 -maxrate 4M -bufsize 8M -spatial_aq 1 -temporal_aq 1 -aq-strength 7 -rc-lookahead 16 -g 240 -pix_fmt yuv420p -profile:v main',
+  '1080p':             '-preset p5 -tune hq -rc vbr -b:v 0 -cq 24 -maxrate 5M -bufsize 10M -spatial_aq 1 -temporal_aq 1 -aq-strength 7 -rc-lookahead 16 -g 240 -pix_fmt yuv420p -profile:v main',
+  '1080p_hq':          '-preset p5 -tune hq -rc vbr -b:v 0 -cq 21 -maxrate 8M -bufsize 16M -spatial_aq 1 -temporal_aq 1 -aq-strength 7 -rc-lookahead 16 -g 240 -pix_fmt yuv420p -profile:v main'
 };
 
 const RESOLUTION_SCALE = {
@@ -50,6 +52,12 @@ module.exports = async (args) => {
 
   const needsVideoReencode = v.analyzer_needsVideoReencode === true || v.analyzer_needsVideoReencode === 'true';
   const videoQualityTier = v.analyzer_videoQualityTier || '1080p';
+  // HQ override set by the tagRouter_1 flow node when a file path matches an
+  // hqPatterns entry. Picks the `${tier}_hq` variant of VIDEO_QUALITY, which
+  // uses a tighter CQ and higher maxrate for shows the user doesn't want
+  // squashed as hard by the default A1 settings.
+  const hqOverride = v.hq_override === true || v.hq_override === 'true';
+  const effectiveTier = hqOverride ? `${videoQualityTier}_hq` : videoQualityTier;
   const targetResolution = v.analyzer_targetResolution || '';
   const totalDuration = parseFloat(v.analyzer_duration) || 0;
   const sourceFile = v.analyzer_sourceFile || args.inputFileObj._id || args.inputFileObj.file;
@@ -172,8 +180,11 @@ module.exports = async (args) => {
       args.jobLog(`Video: HEVC NVENC, keep resolution`);
     }
 
-    // Quality preset
-    let qualityArgs = VIDEO_QUALITY[videoQualityTier] || VIDEO_QUALITY['1080p'];
+    // Quality preset — use effectiveTier (may be `${tier}_hq` when tagRouter
+    // set hq_override), fall back to base tier if HQ variant is missing.
+    let qualityArgs = VIDEO_QUALITY[effectiveTier]
+                   || VIDEO_QUALITY[videoQualityTier]
+                   || VIDEO_QUALITY['1080p'];
     // When hwaccel cuda is active, frames are in GPU memory (cuda pixel format).
     // -pix_fmt yuv420p would try to insert a software conversion filter which fails
     // with "Error reinitializing filters! Function not implemented". NVENC handles
@@ -182,7 +193,7 @@ module.exports = async (args) => {
       qualityArgs = qualityArgs.replace('-pix_fmt yuv420p', '').replace(/\s+/g, ' ').trim();
     }
     ffmpegArgs.push(...qualityArgs.split(' '));
-    args.jobLog(`Quality tier: ${videoQualityTier}`);
+    args.jobLog(`Quality tier: ${effectiveTier}${hqOverride ? ' (HQ override via tagRouter)' : ''}`);
   } else {
     ffmpegArgs.push('-c:v', 'copy');
     args.jobLog('Video: copy');
